@@ -1,0 +1,1017 @@
+# trans_daily_NMT python converted from Perl
+# Copyright: Ford Motor Company: 2024
+# With kind a patient assistence from copilot
+# Date        By        Description
+# ----------  --------  -----------------------------------------------------
+# 2024/07/21  asahoo7  US6331480-AI Translation Background Job  trans_daily_nmt call
+#                       -h is not supported in python hence not used
+# Test example:
+# export LC_CTYPE=en_US.UTF-8
+# export NLS_LANG=american_america.AL32UTF8
+# python trans_daily_NMT.py  -l [language] -d [database] -w /temp/nmt/ -f [family] -c 0 -n [min phSeq] -x [max phSeq]
+# -l = 2 letter language pair, examples: ed (English - Deutsch [German]), es (English - Spanish)
+# -d = database
+# -w = working directory
+# -f = family code
+# -c =
+# -n = minimum phSeq
+# -x = maximum phSeq
+
+from configparser import ConfigParser
+import oracledb
+import argparse
+import requests
+import json
+import time
+import datetime
+import re
+import os
+import locale
+import sys
+
+def write_metrics():
+    print("metrics?\n")
+    metricsfile = './metrics/cache_metrics_' + msource + mtarget + ".txt"
+    with open(metricsfile, "w") as METRICS:
+        
+        METRICS.write(f"{msource}{mtarget}: CacheHits, FileHits, SOAHits, TotalTrans, Cache/Total, AvgCacheTime, AvgFileTime, AvgSOATime, TotalTime\n")
+        if totalTranslations > 0:
+            translationRatio = cacheHits / totalTranslations
+        else:
+            translationRatio = 0
+
+        METRICS.write(f"{cacheHits},{fileHits},{SOAHits},{totalTranslations},{translationRatio},")
+        if cacheHits > 0:
+            METRICS.write(f"{totalCacheTime / cacheHits},")
+        else:
+            METRICS.write("0,")
+
+        if fileHits > 0:
+            METRICS.write(f"{totalFileTime / fileHits},")
+        else:
+            METRICS.write("0,")
+
+        if SOAHits > 0:
+            METRICS.write(f"{totalSOATime / SOAHits},")
+        else:
+            METRICS.write("0,")
+
+        elapsed = time.time() - start
+        METRICS.write(f"{elapsed}\n")
+    return 0
+
+def trans_ae_for_current_ph(cur_ph_node, cur_ph_seq):
+    global SQLinsert1,SQLinsert2,table_name,SQLinsertFlag
+    k = 0
+    SQLStmnt = f"SELECT A.PH_NODE_ID, A.PH_SEQ, A.ELE_NODE_ID, A.ELE_SEQ, A.AE_NODE_ID, A.AE_SEQ, A.LANGUAGE_ID, A.STANDARD_LANGUAGE_DESCRIPTION FROM ALLOCATABLE_ELEMENT_TRANSLATNS A WHERE A.LANGUAGE_ID = 'USA' AND A.PH_NODE_ID = {cur_ph_node} AND A.PH_SEQ = {cur_ph_seq} AND NOT EXISTS (select 'X' FROM ALLOCATABLE_ELEMENT_TRANSLATNS WHERE ph_node_id= {cur_ph_node} and ph_seq= {cur_ph_seq} and ele_node_id=A.ELE_NODE_ID and ele_seq=A.ELE_SEQ and ae_node_id=A.AE_NODE_ID and ae_seq=A.AE_SEQ and language_id=rpad('{UNI_language_id}',3))"
+    cursor2 = conn.cursor()
+    try:
+        cursor2.execute(SQLStmnt)
+    except Exception as e:
+        print(f"Exec error on {SQLStmnt} [{str(e)}]")
+        processSheetError = 1
+        write_metrics()
+        exit()
+
+    for row in cursor2.fetchall():
+        ae_PH_NODE_ID, ae_PH_SEQ, ae_ELE_NODE_ID, ae_ELE_SEQ, ae_AE_NODE_ID, ae_AE_SEQ, ae_LANGUAGE_ID, ae_STANDARD_LANGUAGE_DESCRIPTION = row
+        if cur_ph_node != ae_PH_NODE_ID:
+            print("\nLogical error 1 in Allocatable Elements Data!\n")
+        if cur_ph_seq != ae_PH_SEQ:
+            print("\nLogical error 2 in Allocatable Elements Data!\n")
+        SQLinsert1 = f"INSERT INTO allocatable_element_translatns (PH_NODE_ID, PH_SEQ, ELE_NODE_ID, ELE_SEQ, AE_NODE_ID, AE_SEQ, STANDARD_LANGUAGE_DESCRIPTION, LANGUAGE_ID) VALUES ({ae_PH_NODE_ID}, {ae_PH_SEQ}, {ae_ELE_NODE_ID}, {ae_ELE_SEQ}, {ae_AE_NODE_ID}, {ae_AE_SEQ}, '"
+        SQLinsert2 = f"', '{UNI_language_id}')"
+
+        field_name_to_translate = 'standard_language_description'
+        table_name = 'allocatable_element_translatns'
+        key_cnt = 0
+
+        k += 1
+        textToTranslate = ae_STANDARD_LANGUAGE_DESCRIPTION
+        
+        SQLinsertFlag = 1
+        max_length = 500
+        status = dblut_main(textToTranslate)
+
+    cursor2.close()
+
+    if DBG:
+        print(f"\nRequested {k} AE trans ph_node/ph_seq = {cur_ph_node}/{cur_ph_seq}")
+
+    return 0
+
+def trans_el_for_current_ph(kode, cur_ph_node, cur_ph_seq):
+    global SQLinsert1,SQLinsert2,table_name,SQLinsertFlag
+    k = 0
+    if kode == 1:
+        SQLStmnt = f"SELECT A.PH_NODE_ID, A.PH_SEQ, A.ELE_NODE_ID, A.ELE_SEQ, A.LANGUAGE_ID, A.TEXT FROM ELEMENT_TRANSLATIONS A WHERE A.LANGUAGE_ID = 'AI' AND A.PH_NODE_ID = {cur_ph_node} AND A.PH_SEQ = {cur_ph_seq} AND (A.TEXT IS NOT NULL OR (A.TEXT IS NULL AND A.REMARK IS NOT NULL)) AND NOT EXISTS (SELECT 'X' FROM ELEMENT_TRANSLATIONS WHERE ph_node_id={cur_ph_node} AND ph_seq={cur_ph_seq} AND ele_node_id=A.ELE_NODE_ID AND ele_seq=A.ELE_SEQ AND language_id=rpad('{UNI_language_id}',3))"
+    elif kode == 2:
+        SQLStmnt = f"SELECT A.PH_NODE_ID, A.PH_SEQ, A.ELE_NODE_ID, A.ELE_SEQ, A.LANGUAGE_ID, A.TEXT FROM ELEMENT_TRANSLATIONS A WHERE A.LANGUAGE_ID = 'USA' AND A.PH_NODE_ID = {cur_ph_node} AND A.PH_SEQ = {cur_ph_seq} AND (A.TEXT IS NOT NULL OR (A.TEXT IS NULL AND A.REMARK IS NOT NULL)) AND NOT EXISTS (SELECT 'X' FROM ELEMENT_TRANSLATIONS WHERE ph_node_id={cur_ph_node} AND ph_seq={cur_ph_seq} AND ele_node_id=A.ELE_NODE_ID AND ele_seq=A.ELE_SEQ AND language_id=rpad('{UNI_language_id}',3)) AND NOT EXISTS (SELECT 'Y' FROM ELEMENT_TRANSLATIONS WHERE ph_node_id={cur_ph_node} AND ph_seq={cur_ph_seq} AND ele_node_id=A.ELE_NODE_ID AND ele_seq=A.ELE_SEQ AND language_id='AI')"
+    else:
+        return 1
+    cursor2 = conn.cursor()
+    try:
+        cursor2.execute(SQLStmnt)
+    except Exception as e:
+        print(f"Exec error on {SQLStmnt} [{str(e)}]")
+        processSheetError = 1
+        write_metrics()
+        exit()
+
+    for row in cursor2.fetchall():
+        
+        el_PH_NODE_ID, el_PH_SEQ, el_ELE_NODE_ID, el_ELE_SEQ, el_LANGUAGE_ID, el_TEXT = row
+        field_name_to_translate = "text"
+        table_name = "element_translations"
+        key_cnt = 0
+        SQLinsert1 = f"INSERT INTO element_translations (PH_NODE_ID, PH_SEQ, ELE_NODE_ID, ELE_SEQ, TEXT, LANGUAGE_ID) VALUES ({el_PH_NODE_ID}, {el_PH_SEQ}, {el_ELE_NODE_ID}, {el_ELE_SEQ}, '"
+        SQLinsert2 = f"', '{UNI_language_id}')"
+
+        k += 1
+        textToTranslate = el_TEXT
+
+        if textToTranslate == '':
+            textToTranslate = "Read Remark"
+
+        SQLinsertFlag = 1
+        max_length = 255
+        status = dblut_main(textToTranslate)
+
+    cursor2.close()
+
+    if DBG:
+        print(f"\nRequested {k} ELEMENT trans(type {kode}) ph_node/ph_seq = {cur_ph_node}/{cur_ph_seq}")
+
+    return 0
+
+def trans_el_remarks_for_current_ph(cur_ph_node, cur_ph_seq):
+    global SQLinsert1,SQLinsert2,table_name,SQLinsertFlag
+    k = 0
+    
+    SQLStmnt = f"SELECT A.PH_NODE_ID, A.PH_SEQ, A.ELE_NODE_ID, A.ELE_SEQ, A.LANGUAGE_ID, A.REMARK FROM ELEMENT_TRANSLATIONS A WHERE A.LANGUAGE_ID = 'USA' AND A.PH_NODE_ID = {cur_ph_node} AND A.PH_SEQ = {cur_ph_seq} AND A.REMARK IS NOT NULL AND EXISTS (SELECT 'X' FROM ELEMENT_TRANSLATIONS WHERE ph_node_id={cur_ph_node} AND ph_seq={cur_ph_seq} AND ele_node_id=A.ELE_NODE_ID AND ele_seq=A.ELE_SEQ AND language_id=rpad('{UNI_language_id}',3) AND REMARK IS NULL)"
+    
+    cursor2 = conn.cursor()
+    try:
+        cursor2.execute(SQLStmnt)
+    except Exception as e:
+        print(f"Prep error on {SQLStmnt} [{str(e)}]")
+        processSheetError = 1
+        write_metrics()
+        exit()
+
+    for row in cursor2.fetchall():
+        
+        el_PH_NODE_ID, el_PH_SEQ, el_ELE_NODE_ID, el_ELE_SEQ, el_LANGUAGE_ID, el_REMARK = row
+        field_name_to_translate = "remark"
+        table_name = "element_translations"
+        key_cnt = 0
+
+        if DBG2:
+            print(f"On Element REMARK: PH_NODE={cur_ph_node}, PH_SEQ={cur_ph_seq}, ELE_SEQ={el_ELE_SEQ}")
+            print(f"Remark to translate is: {el_REMARK}")
+
+        if DBG3:
+            remarks_to_process += 1
+            print(f"Remark to translate ({remarks_to_process}) is: {el_REMARK}")
+
+
+        SQLinsert1 = f"UPDATE element_translations SET REMARK ='"
+        SQLinsert2 = f"' WHERE PH_NODE_ID = {el_PH_NODE_ID} and PH_SEQ = {el_PH_SEQ} AND ELE_NODE_ID = {el_ELE_NODE_ID} AND ELE_SEQ = {el_ELE_SEQ} AND LANGUAGE_ID = '{UNI_language_id}'"
+
+        k += 1
+        textToTranslate = el_REMARK
+        SQLinsertFlag = 1
+        max_length = 4000
+        status = dblut_main(textToTranslate)
+
+    cursor2.close()
+
+    if DBG:
+        print(f"\nRequested {k} ELEMENT REMARK trans ph_node/ph_seq = {cur_ph_node}/{cur_ph_seq}")
+
+    return 0
+
+def trans_current_ph(cur_ph_node, cur_ph_seq):
+    global SQLinsert1,SQLinsert2,table_name
+    global remark,title, translatedText,SQLinsertFlag
+    if DBG2:
+        print(f"Starting PH translations on ph_node/ph_seq = {cur_ph_node}/{cur_ph_seq}")
+
+    field_name_to_translate = "title"
+    table_name = "process_header_translations"
+    key_cnt = 0
+
+    if DBG2:
+        print(f"On Process Header: PH_NODE= {cur_ph_node}, PH_SEQ= {cur_ph_seq}")
+        print(f"Title to translate is: {title}")
+
+    if remark != '':
+        if DBG2:
+            print(f"Remark to translate is: {remark}")
+        field_name_to_translate = "remark"
+        #textToTranslate = remark
+        #SQLinsertFlag = 0
+        #Not required here for remarks update
+        #status = dblut_main(textToTranslate)
+        max_length = 4000
+        #remark = translatedText
+    #Need column value to update in insert table
+    #SQLStmnt = f"SELECT count(*) from process_header_translations where ph_node_id = {cur_ph_node} and ph_seq = {cur_ph_seq} and language_id=rpad('{UNI_language_id}',3)"
+    SQLStmnt = f"SELECT  A.PH_NODE_ID, A.PH_SEQ, A.LANGUAGE_ID, A.TITLE, A.REMARK from process_header_translations A where ph_node_id = {cur_ph_node} and ph_seq = {cur_ph_seq} and language_id='USA'"
+    cursor4 = conn.cursor()
+    try:
+        cursor4.execute(SQLStmnt)
+    except Exception as e:
+        print(f"Prep error on {SQLStmnt} [{str(e)}]")
+        processSheetError = 1
+        write_metrics()
+        exit()
+    #Need to fetch all value 
+    for row in cursor4.fetchall():
+    #ph_already_translated = cursor4.fetchone()[0]:
+        PH_NODE_ID, PH_SEQ, LANGUAGE_ID, TITLE, REMARK = row
+        cur_ph_node=PH_NODE_ID
+        cur_ph_seq=PH_SEQ
+        #Need to continue to fetch all value till update in the table
+        #cursor4.close()
+        ph_already_translated=0
+        SQLinsert1 = f"INSERT INTO process_header_translations (PH_NODE_ID, PH_SEQ, TITLE, REMARK, LANGUAGE_ID) VALUES ({cur_ph_node}, {cur_ph_seq}, '"
+        SQLinsert2 = f"', '{remark}', '{UNI_language_id}')"
+        textToTranslate = TITLE
+        SQLinsertFlag = 1
+        max_length = 255
+        status = dblut_main(textToTranslate)
+        #Need to continue to fetch all value till update in the table
+    cursor4.close()
+
+    SQLStmnt = f"SELECT A.PH_NODE_ID, A.PH_SEQ, A.LANGUAGE_ID, A.TITLE, A.REMARK from process_header_translations A where ph_node_id = {cur_ph_node} and ph_seq = {cur_ph_seq} and language_id='USA'"
+    cursor4 = conn.cursor()
+    try:
+        cursor4.execute(SQLStmnt)
+    except Exception as e:
+        print(f"Prep error on {SQLStmnt} [{str(e)}]")
+        processSheetError = 1
+        write_metrics()
+        exit()
+    #Need to fetch all value 
+    for row in cursor4.fetchall():
+        PH_NODE_ID, PH_SEQ, LANGUAGE_ID, TITLE, REMARK = row
+        remark=REMARK
+        cur_ph_node=PH_NODE_ID
+        cur_ph_seq=PH_SEQ
+        ph_already_translated=0
+
+        SQLinsert1 = f"UPDATE process_header_translations SET REMARK ='"
+        SQLinsert2 = f"' WHERE PH_NODE_ID = {cur_ph_node} and PH_SEQ = {cur_ph_seq} and LANGUAGE_ID = '{UNI_language_id}'"
+        textToTranslate = remark
+        SQLinsertFlag = 1
+        max_length = 255
+        status = dblut_main(textToTranslate)
+        #Added Need to continue to fetch all value till update in the table
+    cursor4.close()
+    return 0
+
+def dblut_main(textToTranslate):
+
+    global totalTranslations, SQLinsertFlag, SOAHits, totalSOATime
+    global originalTextToTranslate
+    # Processing Cache requires that synonym expansion and html tagging occurs here
+    # before write_req_file is called (if needed)
+    if EXP_SYNS:
+        expand_synonyms(textToTranslate)
+        
+    insert_tag(textToTranslate)
+
+    # Count translations and clean up spaces for caching
+    totalTranslations += 1
+    textToTranslate = re.sub(r'^\s+|\s+$', '', textToTranslate)  # remove leading and trailing whitespace
+    textToTranslate = re.sub(r'\s+', ' ', textToTranslate)  # change multiple spaces to one space
+
+    originalTextToTranslate = textToTranslate  # for metrics analysis
+    SourceLanguage = lsource.upper()
+    TargetLanguage = ltarget.upper()
+
+    if soap_profile == '':
+        # No SOAP profile, so use file system translation method
+        filestart = time.time()
+        dblut_status = write_req_file()
+        dblut_status = check_stat_file()
+
+        if dblut_status == 1:
+            print("Unable to process status file {} -- aborting".format(stat_file_name))
+            write_metrics()
+            exit()
+        elif dblut_status == 2:
+            print("Bypassing Invalid Source Language Error or Translation Not Finished Error")
+        else:  # Status OK
+            dblut_status = read_tran_file()
+
+            if dblut_status:
+                print("Unable to process translation file {} -- aborting".format(tran_file_name))
+                write_metrics()
+                exit()
+            # Moved from read_tran_file as part of cache implementation
+            status = remove_tag()
+            translatedText = translatedText[:-1]  # Remove final period
+            if SQLinsertFlag != 0:
+                dblut_status = insert_db_record(translatedText)
+
+        # remove the work files from the directory
+        systemStatus = os.system('rm -f {}'.format(server_dir + "\00*"))
+
+        fileHits += 1
+        elapsed = time.time() - filestart
+        totalFileTime += elapsed
+
+    if soap_profile != '':
+        # soap_profile has a value, so use SOAP translation
+        SOAstart = time.time()
+        # soap no longer used
+        #soap_host = INI['SOAPHOST']
+        #soap_port = INI['SOAPPORT']
+        soap_text = originalTextToTranslate
+
+        # Changes for NMT - October 2020
+        if soap_text != '':
+            translated_text = trans_nmt(soap_lp, soap_text)
+            if SQLinsertFlag != 0:
+                dblut_status = insert_db_record(translated_text)
+                
+
+        SOAHits += 1
+        elapsed = time.time() - SOAstart
+        totalSOATime += elapsed
+
+    return
+
+def write_req_file():
+    global server_dir, SourceLanguage, TargetLanguage, textToTranslate
+    for potential_base in range(99999999):
+        potential_status_file = f"{server_dir}/{potential_base:08d}.sta"
+        potential_request_file = f"{server_dir}/{potential_base:08d}.req"
+        if not os.path.exists(potential_status_file) and not os.path.exists(potential_request_file):
+            request_file_name = f"{server_dir}/{potential_base:08d}.req"
+            stat_file_name = f"{server_dir}/{potential_base:08d}.sta"
+            tran_file_name = f"{server_dir}/{potential_base:08d}.trn"
+            break
+
+    try:
+        with open(request_file_name, 'w') as req_file:
+            req_file.write("[Server Options]\n")
+            req_file.write(f"SourceLanguage={SourceLanguage}\n")
+            req_file.write(f"TargetLanguage={TargetLanguage}\n")
+            req_file.write("DocumentType=0\n")
+            req_file.write("TopicalGlossaries=0\n")
+            req_file.write("FileFormat=0\n")
+            req_file.write("CustomerStemDictionary=0\n")
+            req_file.write("CustomerIdlsDictionary=0\n")
+            req_file.write("[Server]\n")
+            req_file.write("[Translation Text]\n")
+            req_file.write("\n")
+            textToTranslate = textToTranslate.lower()
+            req_file.write(f"<tu>{textToTranslate}.</tu>\n")
+            print(f"Literal request:<tu>{textToTranslate}.</tu>\n")
+    except IOError:
+        print(f"Unable to create request file {request_file_name}")
+        write_metrics()
+        exit()
+
+def check_stat_file(stat_file_name, INFINITE_LOOP_LMT):
+    loopCounter = 0
+    localStatus = 1
+    while loopCounter <= INFINITE_LOOP_LMT:
+        try:
+            with open(stat_file_name, 'r') as STATFILE:
+                for statLine in STATFILE:
+                    statLine = statLine.rstrip()
+                    if statLine == 'CurrentAction=DONE':
+                        localStatus = 0
+                        loopCounter = INFINITE_LOOP_LMT + 1
+                        print("In check_stat_file - found good stat and exit")
+                    else:
+                        loopCounter += 1
+                        if statLine == 'Explanation=Invalid SourceLanguage':
+                            print("Found Invalid Source Language error")
+                            localStatus = 2
+                            loopCounter = INFINITE_LOOP_LMT + 1
+                        elif statLine == 'Explanation=PREPROCESS':
+                            print("Found Pre-Processing error")
+                            localStatus = 2
+                            loopCounter = INFINITE_LOOP_LMT + 1
+                        elif loopCounter >= INFINITE_LOOP_LMT and statLine == 'Explanation=TRANSLATING':
+                            print("Translating not completed - bypass this record")
+                            localStatus = 2
+        except FileNotFoundError:
+            pass
+
+        if localStatus == 1:
+            time.sleep(SLEEP_TIME)
+
+    return localStatus
+
+def read_tran_file(tran_file_name, DBG2):
+    localStatus = 1
+    tranPointer = 0
+    translatedText = ''
+
+    with open(tran_file_name, 'r', encoding='utf-8') as TRANFILE:
+        for tranLine in TRANFILE:
+            tranPointer += 1
+            if tranPointer < 0:
+                localStatus = 0
+                translatedText += tranLine.strip()
+            if tranLine.strip() == '[Translation Text]':
+                tranPointer = -999
+
+    print("Literal response:", translatedText)
+    translatedText = translatedText.upper()
+    if localStatus == 0 and DBG2:
+        print("Translation:", translatedText)
+
+    return localStatus
+
+def insert_db_record(translatedText):
+    global SQLinsert1,SQLinsert2
+    # Replace single quotes with 2 single quotes
+    translatedText = re.sub("'", "''", translatedText)
+
+    # Process translations that are too long for the database
+    if len(translatedText) > max_length:
+        print(f"Current Length is: {len(translatedText)}")
+        print(f"Max Length is: {max_length}")
+        print(f"Replacing Text due to length: {translatedText}")
+        translatedText = error_text
+
+    SQLinsert = SQLinsert1 + translatedText + SQLinsert2
+    print(SQLinsert)
+    if DBG2:
+        print(f"SQL Insert is: {SQLinsert}")
+
+    if DBG3 and SQLinsert[:6] == 'UPDATE':
+        remarks_at_sql += 1
+        print(f"SQL ({remarks_at_sql}) is: {SQLinsert}")
+
+    try:
+        cursor=conn.cursor()
+        cursor.execute(SQLinsert)
+    except Exception as e:
+        print(f"Exec error on {SQLinsert} [{str(e)}]")
+        processSheetError = 1
+
+    # Capture translation requests to determine most frequent for static cache
+    if table_name in ['allocatable_element_translatns', 'element_translations'] and analytics == 1 and CACHE_USE == 1:
+        metricsfile = f'./metrics/cache_analysis_{msource}{mtarget}_{day}.txt'
+        with open(metricsfile, 'a', encoding='utf-8') as metrics:
+            metrics.write(f"{msource}:{mtarget}:{originalTextToTranslate}:{translatedText}\n")
+
+    return 0
+
+def insert_tag(textToTranslate):
+    
+    if HTML_TAGS == 1:
+        comment_tag = '<comment>'
+        uncomment_tag = '</comment>'
+        modifier_tag = '<modifier>'
+        unmodifier_tag = '</modifier>'
+    else:
+        comment_tag = '{'
+        uncomment_tag = '}'
+        modifier_tag = '{'
+        unmodifier_tag = '}'
+
+    modtext = ''
+    new_sentence = ''
+    new_sentence_suffix = ''
+    modon = 0
+
+    for brkchar in textToTranslate:
+        if brkchar == '{':
+            modon = 1
+            modtext = '{'
+        elif brkchar == '}' and modon == 1:
+            modon = 0
+            modtext += '}'
+            if re.match(r'{\s*\w+\s*}', modtext):  # { MAYBEwhitespace word MAYBEwhitespace }
+                #if merge_1gram_mod == 1:
+                if MERGE_1GRAM_MOD == 1:
+                    modtext = modtext.replace('{', '').replace('}', '')
+                else:
+                    modtext = modtext.replace('{', modifier_tag).replace('}', unmodifier_tag)
+                new_sentence += modtext
+            else:
+                #if noxlat_ngram_mod == 1:
+                if NOXLAT_NGRAM_MOD == 1:
+                    new_sentence_suffix += modtext
+                else:
+                    modtext = modtext.replace('{', comment_tag).replace('}', uncomment_tag)
+                    new_sentence += modtext
+            modtext = ''
+        elif modon == 1:
+            modtext += brkchar
+        else:
+            new_sentence += brkchar
+    textToTranslate = new_sentence
+    textToTranslate += modtext  # pickup straggling bracket mismatches
+    textToTranslate = re.sub(r'  ', ' ', textToTranslate)
+    return textToTranslate
+
+def remove_tag(translated_text, new_sentence_suffix):
+    # Replace <modifier> and </modifier> with {}
+    translated_text = re.sub(r'<modifier>', '{', translated_text, flags=re.IGNORECASE)
+    translated_text = re.sub(r'</modifier>', '}', translated_text, flags=re.IGNORECASE)
+
+    # Replace <comment> and </comment> with {}
+    translated_text = re.sub(r'<comment>', '{', translated_text, flags=re.IGNORECASE)
+    translated_text = re.sub(r'</comment>', '}', translated_text, flags=re.IGNORECASE)
+
+    # Remove all HTML tags
+    translated_text = re.sub(r'<[^>]*>', '', translated_text)
+
+    # Remove leading whitespace
+    translated_text = re.sub(r'^\s+', '', translated_text)
+
+    # Append newSentenceSuffix to translatedText
+    translated_text += new_sentence_suffix
+
+    # Replace single quote with two single quotes
+    translated_text = re.sub(r'\'', '\'\'', translated_text)
+
+    return translated_text
+
+def expand_synonyms(textToTranslate):
+    global wordRef
+    sentence = textToTranslate + "\0"
+    new_sentence = ''
+    word = ''
+    for es in range(len(sentence)):
+        if sentence[es] not in "{}(),!?\0 ":
+            word += sentence[es]
+        else:
+            if word.upper() in wordRef:
+                word = wordRef[word.upper()]
+                new_sentence += word
+                new_sentence += sentence[es]
+                word = ''
+    textToTranslate = new_sentence[:-1]
+    return textToTranslate
+
+def getToken():
+    url = "https://corpqa.sts.ford.com/adfs/oauth2/token"
+    headers = {
+        "cache-control": "no-cache",
+        "content-type": "application/x-www-form-urlencoded"
+    }
+    data = {
+        "grant_type": "client_credentials",
+        "response_type": "token",
+        "client_id": config.get('DEFAULT','CLIENT_ID'),
+        "client_secret": config.get('DEFAULT','CLIENT_SECRET'),
+        "resource": config.get('DEFAULT','RESOURCE')
+    }
+
+    #tok = "Not enabled for testing"
+    response = requests.post(url, headers=headers, data=data)
+    if response.status_code == 200:
+        response_json = response.json()
+        if "access_token" in response_json and "token_type" in response_json:
+            tok_time = int(time.time())
+            tok = response_json["access_token"]
+        else:
+            tok = "Error getting token: " + response.text
+    else:
+        tok = "Error getting token: " + response.text
+
+    return tok
+
+def trans_nmt(lans, phrase):
+    global tok
+    srcLang, tgtLang = lans.split('_')
+    # Remove non ascii from string to translate
+    phrase = ''.join(i for i in phrase if ord(i)<128)
+    # Convert to lowercase
+    phraseEnc = phrase.lower()
+    # Replace single quote with two single quotes
+    phraseEnc = phraseEnc.replace("'", "''")
+
+    if DBG:
+        print(srcLang)
+        print(tgtLang)
+        print(phrase)
+        print(phraseEnc)
+    curTime = int(time.time())
+    print(f"Cur: {curTime} tok: {tok_time}")
+    if (curTime - tok_time) > 3480:
+        tok = getToken()  # Assuming getToken() is defined and updates the token
+    print(tok)
+
+    langStr = srcLang + tgtLang
+    if langStr == 'ende':
+        langStr = 'ende_de_gsp'
+    elif langStr == 'enzh':
+        langStr = 'enzh_zh_gsp'
+    elif langStr == 'enes':
+        langStr = 'enes_es_gsp'
+
+    perlStr = {'langs': langStr, 'text': phraseEnc}
+    print(perlStr)
+    json_str = json.dumps(perlStr)
+    print(json_str)
+
+    headers = {'accept':'text/plain',
+        'Authorization':'Bearer ' + tok,
+        'Content-Type':'application/json; charset=utf-8'
+    }
+    response = requests.post('https://nmt-api-xvfxlkrwkq-uc.a.run.app/translate', headers=headers, data=json_str)
+    recv_str = ''
+    if response.text and 'Invalid or expired token.' not in response.text:
+        recv_str = response.text
+    else:
+        print("Error after call to NMT. NMT returned: " + response.text)
+    return recv_str
+
+# MAIN
+# Database connection
+# Get config info
+start = time.time()
+print(start)
+
+tok_time = 0
+tok = ''
+
+config = ConfigParser()
+config.read('./trans_daily_NMT.ini')
+
+dbhost = config.get('DB', 'ORACLEHOST')
+dbport = config.get('DB', 'ORACLEPORT')
+dbservice = config.get('DB', 'ORACLEDB')
+dbuser = config.get('DB', 'ORACLEPROXYID')
+dbpass = config.get('DB', 'ORACLEPROXYPSWD')
+
+# Configuration flags
+# - Set in code
+analytics = 0  # 1 = collect analytical metrics data, 0 = do not
+CACHE_USE = 0  # 1 = use cache, 0 = do not
+
+# Next are 1 if translating to Chinese
+MERGE_1GRAM_MOD = 0  # 1 = brackets dropped from { 1gram }
+NOXLAT_NGRAM_MOD = 0  # 1 = do not translate { multi-gram } modifiers; place at end of translated
+
+# Get current date and time
+now = datetime.datetime.now()
+day = now.strftime("%a")
+print (day)
+datestamp = now.strftime("%Y/%m/%d %H:%M:%S")
+
+# validate_cmd_line
+# Define locales for different languages
+LOCALE = {
+    'e': 'en_US.UTF-8',  # English US UTF-8
+    'g': 'de_DE.UTF-8',  # German UTF-8
+    's': 'es_ES.UTF-8',  # Spanish UTF-8
+    'd': 'nl_NL.UTF-8',  # Dutch UTF-8
+    'p': 'pt_PT.UTF-8',  # Portuguese UTF-8
+    'z': 'zh_CN.UTF-8',  # Chinese (Simplified - mainland China)
+    'r': 'ru_RU.UTF-8',  # Russian UTF-8
+    'f': 'fr_FR.UTF-8',  # French UTF-8
+    't': 'th_TH.UTF-8'   # Thai UTF-8
+}
+
+# Define maximum translation length and error text
+max_length = 4000
+error_text = "SYSTEM IS UNABLE TO TRANSLATE TEXT. THE LENGTH OF THE TRANSLATED TEXT EXCEEDS STORAGE LIMITS"
+
+#Added to Declare Insert statement
+SQLinsert1=''
+SQLinsert2=''
+
+table_name=''
+originalTextToTranslate=''
+
+# Initialize caching counters
+cacheHits = 0
+totalCacheTime = 0
+fileHits = 0
+totalFileTime = 0
+SOAHits = 0
+totalSOATime = 0
+totalTranslations = 0
+translatedText = ''
+
+# Define main routine parameters
+INFINITE_LOOP_LMT = 30
+SLEEP_TIME = 2
+
+min_ph = 0
+max_ph = 999999999
+DBG = 0
+DBG2 = 0
+EXP_SYNS = 1
+HTML_TAGS = 1
+
+# Validate command line arguments
+iret = 0
+parser = argparse.ArgumentParser()
+parser.add_argument("-d", required=True, help="the database housing the records to translate.")
+parser.add_argument("-l", required=True, help="the language pair (source/target) symbolized by two lower case characters")
+parser.add_argument("-w", required=True, help="the working directory where the translation occurs.")
+parser.add_argument("-n", type=int, default=0, help="minimum ph_seq number to process.")
+parser.add_argument("-x", type=int, default=999999999, help="maximum ph_seq number to process.")
+parser.add_argument("-b", type=int, default=1, help="debug level (0-2).")
+parser.add_argument("-e", type=int, default=1, help="suppress synonym expansion if -e0")
+#parser.add_argument("-h", type=int, default=1, help="suppress html tagging if -h0")
+parser.add_argument("-f", default='', help="restrict to a particular family")
+parser.add_argument("-c", type=int, default=1, help="suppress use of cache memory translation if -c0")
+parser.add_argument("-m", type=int, default=0, help="use Mexican Spanish for es lang pair if -m1")
+
+args = parser.parse_args()
+
+lsource = args.l[0]
+ltarget = args.l[1]
+if lsource != 'e':
+    print("\nUnrecognized language pair: {}{}".format(lsource, ltarget))
+    exit()
+
+db = args.d
+server_dir = args.w
+EXP_SYNS = args.e
+#HTML_TAGS = args.h
+HTML_TAGS = 0
+CACHE_USE = args.c
+MEXICAN = args.m
+
+if args.b == 0:
+    DBG = 0
+    DBG2 = 0
+elif args.b == 2:
+    DBG = 1
+    DBG2 = 1
+elif args.b == 3:
+    DBG = 0
+    DBG2 = 0
+    DBG3 = 1
+else:
+    DBG = 1
+    DBG2 = 0
+    #Added for DBG3 variable initialization
+    DBG3 = 0
+
+wordRef = {'initValue':'initValue'}
+SQLinsertFlag = 0
+SOAHits = 0
+totalSOATime = 0
+
+if len(db) == 0:
+    print("\nA database instance must be specified")
+    exit()
+if not os.access(server_dir, os.W_OK):
+    print("\nInvalid working dir or no permissions: {}".format(server_dir))
+    exit()
+
+min_ph = 0
+temp = args.n
+if len(str(temp)) > 0:
+    min_ph = temp
+
+max_ph = 9999999
+temp = args.x
+
+if len(str(temp)) > 0:
+    max_ph = temp
+
+if min_ph > max_ph or max_ph <= 0 or min_ph < 0:
+    print("\nBad PH_SEQUENCE range {} - {}".format(min_ph, max_ph))
+    exit()
+
+restrict_to_family_code = ''
+temp = args.f
+if len(temp) > 0:
+    restrict_to_family_code = temp.upper()
+    if DBG2:
+        print("Restricting processing to family " + restrict_to_family_code + "\n")
+
+# End validate_cmd_line
+
+min_ph_save = min_ph
+if DBG:
+    print("source language is {}, target language is {}".format(lsource, ltarget))
+
+# Set locale for target language
+locale.setlocale(locale.LC_CTYPE, LOCALE[ltarget])
+
+# Metrics source and target languages for filenames
+msource = lsource
+mtarget = ltarget
+
+# If soap_profile is set, then SOAP will be used for translation, otherwise file system
+if ltarget == 's':
+    target_language = 'S'
+    UNI_language_id = 'E'
+    soap_lp = 'en_es'
+    ini_profile = 'ENGINE_gspas_en_US_es_ES'
+    engineProfile = config.get('DEFAULT', ini_profile)
+    trans_engine, soap_profile = engineProfile.split(',')
+    if MEXICAN == 1:
+        soap_lp = 'en_es'
+        ini_profile = 'ENGINE_gspas_en_US_es_MX'
+        engineProfile = config.get('DEFAULT', ini_profile)
+        trans_engine, soap_profile = engineProfile.split(',')
+        mtarget = mtarget + '_mex'
+elif ltarget == 'g':
+    target_language = 'G'
+    UNI_language_id = 'D'
+    soap_lp = 'en_de'
+    ini_profile = 'ENGINE_gspas_en_US_de_DE'
+    engineProfile = config.get('DEFAULT', ini_profile)
+    trans_engine, soap_profile = engineProfile.split(',')
+elif ltarget == 'd':
+    target_language = 'D'
+    UNI_language_id = 'NL'
+    soap_lp = 'en_nl'
+    ini_profile = 'ENGINE_gspas_en_US_nl_NL'
+    engineProfile = config.get('DEFAULT', ini_profile)
+    trans_engine, soap_profile = engineProfile.split(',')
+elif ltarget == 'p':
+    target_language = 'P'
+    UNI_language_id = 'P'
+    soap_lp = 'en_pt'
+    ini_profile = 'ENGINE_gspas_en_US_pt_PT'
+    engineProfile = config.get('DEFAULT', ini_profile)
+    trans_engine, soap_profile = engineProfile.split(',')
+elif ltarget == 'r':
+    target_language = 'R'
+    UNI_language_id = 'RU'
+    soap_lp = 'en_ru'
+    ini_profile = 'ENGINE_gspas_EN_US_ru_RU'
+    engineProfile = config.get('DEFAULT', ini_profile)
+    trans_engine, soap_profile = engineProfile.split(',')
+elif ltarget == 'z':
+    target_language = 'Z'
+    UNI_language_id = 'ZH'
+    soap_lp = 'en_zh'
+    ini_profile = 'ENGINE_gspas_EN_US_zh_CN'
+    engineProfile = config.get('DEFAULT', ini_profile)
+    trans_engine, soap_profile = engineProfile.split(',')
+    MERGE_1GRAM_MOD = 1
+    NOXLAT_NGRAM_MOD = 1
+elif ltarget == 't':
+    target_language = 'T'
+    UNI_language_id = 'TH'
+    soap_lp = 'en_th'
+    ini_profile = 'ENGINE_gspas_EN_US_th_TH'
+    engineProfile = config.get('DEFAULT', ini_profile)
+    trans_engine, soap_profile = engineProfile.split(',')
+else:
+    print("\n Unknown target language, exiting...\n")
+    exit()
+
+# Define metrics files
+metrics_files = [
+    'cache_possible_',
+    'cache_impossible_',
+    'cache_analysis_',
+    'soap_analysis_',
+    'soap_diff_'
+]
+
+if DBG:
+    print("trans_engine is {}, soap_profile is {}".format(trans_engine, soap_profile))
+
+# Remove metrics files
+for metric_file in metrics_files:
+    file_to_remove = 'metrics/' + metric_file + msource + mtarget + '_' + day + ".txt"
+    if os.path.exists(file_to_remove):
+        os.remove(file_to_remove)
+
+# Read static cache file
+static_cache_file = 'static_cache_' + msource + mtarget + '.txt'
+CACHE = {}
+if os.path.exists(static_cache_file):
+    with open(static_cache_file, 'r', encoding='utf-8') as scfile:
+        for line in scfile:
+            if not line.startswith('#'):
+                _, _, text_from, text_to = line.split(':')
+                CACHE[text_from] = text_to
+
+# Connect to database
+dsn_tns = oracledb.makedsn(dbhost, dbport, service_name=dbservice) 
+conn = oracledb.connect(user=dbuser, password=dbpass, dsn=dsn_tns)
+
+if DBG:
+    print("\nConnected")
+
+num_rows = 0
+families = []
+
+# Determine which families to process
+#print (UNI_language_id)
+if restrict_to_family_code == '':
+    SQLStmnt = "SELECT FAMILY_CODE from language_translation_families WHERE language_id=rpad(:s,3)"
+    cursor1 = conn.cursor()
+    try:
+        cursor1.execute(SQLStmnt, (UNI_language_id,))
+    except Exception as e:
+        print(f"Execution error on {SQLStmnt} [{str(e)}]", file=sys.stderr)
+        sys.exit()
+
+    for FAMILY_CODE in cursor1.fetchall():
+        num_rows += 1
+        families.append(FAMILY_CODE[0])
+
+    cursor1.close()
+else:
+    families.append(restrict_to_family_code)
+    num_rows += 1
+
+if DBG:
+    print("Have {num_rows} families to translate")
+
+if num_rows == 0:
+    conn.close()
+    write_metrics()
+    sys.exit(0)
+
+# Fetch all of the qualifying Process Headers, then for each PH, examine and translate its child AE's and ELE's.
+num_rows = len(families)
+min_ph_save = min_ph
+
+rmbuffer = "del /f " + server_dir + "\\00*"
+remark = ''
+for n in range(num_rows):
+    k = 0
+    min_ph = min_ph_save
+    cur_family = families[n]
+    if DBG:
+        print(f"Fetching process headers for family= {cur_family}")
+
+    os.system(rmbuffer)
+    SQLStmnt = f"SELECT A.PH_NODE_ID, A.PH_SEQ, A.LANGUAGE_ID, A.TITLE, nvl(A.REMARK,'null') FROM PROCESS_HEADER_TRANSLATIONS A, PROCESS_HEADERS P WHERE A.LANGUAGE_ID = 'USA' AND A.TITLE IS NOT NULL AND A.PH_SEQ BETWEEN {min_ph} AND {max_ph} AND (P.STATUS = 'A' OR P.STATUS = 'C') AND A.PH_NODE_ID = P.PH_NODE_ID AND A.PH_SEQ = P.PH_SEQ AND P.FAMILY_CODE = '{cur_family}' ORDER BY A.PH_SEQ"
+
+    print(SQLStmnt)
+    cursor1 = conn.cursor()
+    try:
+        cursor1.execute(SQLStmnt)
+    except Exception as e:
+        print(f"Execution error on {SQLStmnt} [{str(e)}]")
+        write_metrics()
+        exit()
+    print(cursor1.rowcount)
+    for row in cursor1.fetchall():
+        ph_node, ph_seq, lang_id, title, remark = row
+        print("title: " + title)
+        remark=row[4]
+        if remark == 'null':
+            print("remark is empty")
+        processSheetError = 0
+        cur_ph_node = ph_node
+        cur_ph_seq = ph_seq
+        if DBG2:
+            print(f"\nWorking on PH_NODE= {cur_ph_node}, PH_SEQ= {cur_ph_seq}")
+
+        iret = trans_ae_for_current_ph(cur_ph_node, cur_ph_seq)
+        #iret = trans_el_for_current_ph(1, cur_ph_node, cur_ph_seq)
+        iret = trans_el_for_current_ph(2, cur_ph_node, cur_ph_seq)
+        iret = trans_current_ph(cur_ph_node, cur_ph_seq)
+        '''cursor1.close()
+        conn.close()
+        exit(0)'''
+
+        if iret == 0:
+            k += 1
+
+        if processSheetError == 0:
+            conn.commit()
+            if DBG:
+                print(f"Now processing remarks for {cur_ph_node},{cur_ph_seq}")
+            iret = trans_el_remarks_for_current_ph(cur_ph_node, cur_ph_seq)
+            if processSheetError > 0:
+                print(f"\n SQL error with process remarks: {cur_ph_node}, {cur_ph_seq}. Continuing.")
+            else:
+                conn.commit()
+        else:
+            conn.rollback()
+            print(f"\n SQL error with process: {cur_ph_node}, {cur_ph_seq}. Continuing.")
+
+    cursor1.close()
+
+    if DBG:
+        print(f"\nRequested {k} PH translations, family was {cur_family}")
+    if DBG:
+        print("Done")
+
+# Disconnect and write any additional audit records
+conn.close()
+write_metrics()
+exit()
+FooterFord Motor Company
+Ford Motor Company
+Ford Motor Company
+© 2024 GitHub, Inc.
+Footer navigation
+Help
+Support
+API
+Training
+Blog
+About
+GitHub Enterprise Server 3.10.10
+gspas-python/trans_daily_NMT.py at US6

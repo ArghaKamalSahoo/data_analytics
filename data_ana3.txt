@@ -1,0 +1,427 @@
+// Date        By        Description
+// ----------  --------  -----------------------------------------------------
+// 2024/07/21  asahoo   US6364049 - Initial revision.
+// 2024/07/23  asahoo   US6364049 - Reading the StaaS details from properties file
+// 2024/07/29  asahoo   US6364049 - Read the PDf from the folder.
+// 2024/07/30  asahoo   US6364054 - Initial revision.
+// 2024/08/02  asahoo   US6419732 - Initial revision.
+// 2024/08/05  asahoo   US6419734 - Initial revision.
+
+
+package com.ford.gspas.gspasadminservice.utility;
+
+
+import com.ford.gspas.gspasadminservice.beans.ArchiveScreenBean;
+import com.ford.gspas.gspasadminservice.repository.ArchiveRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.model.*;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.*;
+import java.util.concurrent.*;
+
+
+import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.S3Exception;
+
+@Component
+public class StaasUtils {
+
+    @Value("${cn.app.staas.staasServer}")
+    private String staasServer;
+
+    @Value("${cn.app.staas.staasClientKey}")
+    private String staasAccessKey;
+
+    @Value("${cn.app.staas.staasSecretAccessKey}")
+    private String staasSecretAccessKey;
+
+    @Value("${cn.app.staas.staasBucket}")
+    private String staasBucket;
+
+    @Autowired
+    private ArchiveRepository archiveRepository;
+
+    //RETURN THE FILES PRESENT IN SPECIF FOLDER FROM AMAZON StaaS.
+    public List<S3Object> listFilesInFolder(String folderPath) {
+        try {
+            //Creating the s3 Client that will utilize the credentials and the endpoint provided
+            S3Client client = getS3Object();
+            //String prefix = "2012/TQ1/";
+
+            ListObjectsV2Request listObjectsRequest = ListObjectsV2Request.builder()
+                    .bucket(staasBucket)
+                    .prefix(folderPath) // specify the folder path as prefix
+                    .build();
+
+            ListObjectsV2Response listObjectsResponse = client.listObjectsV2(listObjectsRequest);
+            return listObjectsResponse.contents();
+
+        } catch (URISyntaxException | S3Exception e) {
+            // Handle exceptions appropriately
+            e.printStackTrace();
+            return Collections.emptyList();
+        }
+    }
+
+    public byte[] downloadPDF(String key) throws URISyntaxException {
+
+        //Creating the s3 Client that will utilize the credentials and the endpoint provided
+        S3Client s3Client = getS3Object();
+
+        // Check if the object exists
+        HeadObjectRequest headObjectRequest = HeadObjectRequest.builder()
+                .bucket(staasBucket)
+                .key(key)
+                .build();
+
+        try {
+            // Download the object
+            GetObjectRequest getObjectRequest = GetObjectRequest.builder()
+                    .bucket(staasBucket)
+                    .key(key.trim())
+                    .build();
+
+            ResponseBytes<GetObjectResponse> objectBytes = s3Client.getObjectAsBytes(getObjectRequest);
+            byte[] data = objectBytes.asByteArray();
+            return data;
+
+        } catch (S3Exception e) {
+            System.out.println(" ERROR IN DOWNLOAD THE PDF FILE : " + e.getMessage());
+
+        }
+        return null;
+    }
+
+    //dummy list for local testing
+    public List<S3Object> getDummyList(){
+        S3Object obj1 = S3Object.builder()
+                .key("2012/TQ1/000001-TQ1-2011.00-F-B-L-00410-1-0--VIN PLATE TO COWL TOP PANEL.pdf")
+                .build();
+
+        S3Object obj2 = S3Object.builder()
+                .key("2012/TQ1/000001-TQ1-2011.00-F-B-L-01400-3-0--INSTALL OWNERS MANUAL & NEXT GEN NAV SUPPLEMENT.pdf")
+                .build();
+
+        S3Object obj3 = S3Object.builder()
+                .key("2012/TQ1/010702-TQ1-2007.00-F-S-W-02100-6-0--APPLY REAR DOOR SEALING PATCHES.pdf")
+                .build();
+
+        S3Object obj4 = S3Object.builder()
+                .key("2012/TQ1/010200-TQ1-2007.00-B-9-Z-00050-4-0--APRON MIDDLE SUSP BOLT REPAIR -- MISSING (BODY & F.pdf")
+                .build();
+
+        List<S3Object> s3ObjectList = new ArrayList<>();
+        s3ObjectList.add(obj1);
+        s3ObjectList.add(obj4);
+        s3ObjectList.add(obj2);
+        s3ObjectList.add(obj3);
+        return s3ObjectList;
+    }
+
+    //Return the S3Object
+    private S3Client getS3Object() throws URISyntaxException {
+        AwsBasicCredentials awsCreds = AwsBasicCredentials.create(
+                staasAccessKey,
+                staasSecretAccessKey);
+
+        S3Configuration config = S3Configuration.builder()
+                .pathStyleAccessEnabled(true)
+                .build();
+
+        //Creating the s3 Client that will utilize the credentials and the endpoint provided
+        return S3Client.builder()
+                .credentialsProvider(StaticCredentialsProvider.create(awsCreds))
+                .endpointOverride(getURI())
+                .serviceConfiguration(config)
+                .region(Region.US_EAST_1)
+                .build();
+    }
+
+    //URI holds the Ford Object Storage endpoint
+    public  URI  getURI() throws URISyntaxException {
+        return new URI(staasServer); //staasServer
+    }
+
+    //////////////////////////PROCESS ARCHIVE BACKGROUND JOB///PROCESS COPY/////////////////////////////////
+
+    /****
+     * Below all method is for process copy. we are using the below steps
+     *
+     * a.	Read the pdf files name from wkarch temp folder available in STaaS repository.
+     * b.	Split the file _ and get Model Year, Family Code and File Name/Title.
+     * c.	Inside the dev bucket (STaaS) create folders with Model Year and Family Code if not available.
+     * d.	Then copy the pdf file from wkarch temporary folder to respective Model Year and Family Code sub folder.
+     * e.	After copy process program will delete the corresponding pdf files from wkarch folder.
+     * f.	Once all files are copied to respective folder program will insert the model year and family code details into cg_ref_codes table.
+     *
+     * ******/
+
+    //FOLDER NAME FROM WHERE WE NEED TO COPY THE PDF.
+    @Value("${cn.app.staas.staasTempBucket}")
+    private String tempFolderBucket;
+
+    @Autowired
+    private ExecutorService executorService;
+
+    // Set to store the year value.
+    Set<String> deckYearSet = null;
+    // Map to store the family and its corresponding year to store. we're storing like year_family in set
+    Set<String> yearFamilySet = null;
+
+    public boolean processFiles() throws IOException, URISyntaxException {
+        List<String> filesToDelete = new ArrayList<>();
+        yearFamilySet = new HashSet<>();
+        deckYearSet = new HashSet<>();
+
+        try {
+            System.out.println("Fetching file list from S3...");
+            List<S3Object> fileList = getS3ObjectList();
+            System.out.println("Found " + fileList.size() + " files in S3.");
+
+            List<Future<FileProcessingResult>> futures = new ArrayList<>();
+
+            for (S3Object object : fileList) {
+                if (object.key() != null && doesObjectExist(object.key()))
+                    futures.add(executorService.submit(() -> processFile(object)));
+            }
+
+            // Wait for all tasks to complete
+            for (Future<FileProcessingResult> future : futures) {
+                try {
+                    FileProcessingResult result = future.get();
+                    if (result.isProcessed())
+                        filesToDelete.add(result.getFileKey());
+
+                } catch (InterruptedException | ExecutionException e) {
+                    e.printStackTrace();
+                }
+            }
+
+            //System.out.println("Deleting processed files from temp folder...");
+            deleteFilesFromTempFolder(filesToDelete);
+            //System.out.println("Files deleted from temp folder.");
+
+            //System.out.println("Inserting deck years into database..."+deckYearSet.size());
+            insertYearIntoDatabase(deckYearSet);
+            //System.out.println("Deck years inserted into database.");
+
+            //System.out.println("Inserting families into database..."+yearFamilySet.size());
+            insertFamilyIntoDatabase(yearFamilySet);
+            //System.out.println("Families inserted into database.");
+
+            return true;
+        } catch (URISyntaxException | S3Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+        finally {
+            // clear the set once all operation done
+            Set<String> deckYearSet = null;
+            Set<String> yearFamilySet = null;
+        }
+    }
+
+    //TO PROCESS EACH FILES.
+    private FileProcessingResult processFile(S3Object object) {
+        try (InputStream inputStream = getS3Object().getObject(GetObjectRequest.builder()
+                .bucket(tempFolderBucket)
+                .key(object.key())
+                .build())) {
+
+            String[] parts = object.key().split("_");
+            if (parts.length != 3) {
+                return new FileProcessingResult(object.key(), false); // Skip if not exactly 3 parts
+            }
+
+            String deckYear = parts[0].trim();
+            String familyCode = parts[1].trim();
+            String title = parts[2].trim();
+            //INSERTING INTO SET
+            deckYearSet.add(deckYear);
+            yearFamilySet.add(deckYear+"_"+familyCode);
+
+            String deckYearFolder = deckYear + "/";
+            String familyCodeFolder = familyCode + "/";
+
+            //System.out.println("Creating folders if not exists: " + deckYearFolder + familyCodeFolder);
+            createFolderIfNotExists(deckYear);
+            createFolderIfNotExists(deckYearFolder + familyCodeFolder);
+
+            //System.out.println("Uploading file to S3: " + deckYearFolder + familyCodeFolder + title);
+            boolean uploadFlag = uploadFileToS3(inputStream, deckYearFolder + familyCodeFolder + title, getObjectContentLength(object));
+
+            return new FileProcessingResult(object.key(), uploadFlag); // Return result //AFTER TESTING REMOVE ABOVE IF ELSE
+        } catch (Exception e) {
+            e.printStackTrace();
+            return new FileProcessingResult(object.key(), false); // Return failed result
+        }
+    }
+
+    //TO INSERT THE FAMILY INTO DB.
+    private void insertFamilyIntoDatabase(Set<String> familyStore) {
+        //year -> First part, & familyCode -> Second part
+        for (String yearFamily : familyStore) {
+            if (yearFamily != null && !yearFamily.isEmpty()) {
+                String year = yearFamily.split("_")[0];
+                String family = yearFamily.split("_")[1];
+                String isFamilyPresent = archiveRepository.checkFamily(year, family);
+                //System.out.println("Year: " + year + ", Family: " + family+ ", isFamilyPresent: " + isFamilyPresent);
+                if (isFamilyPresent == null || isFamilyPresent.isEmpty()){
+                    ArchiveScreenBean screenBean = new ArchiveScreenBean();
+                    screenBean.setRvLowValue(family);
+                    screenBean.setRvDomain("PRCARCH.family"+year);
+                    archiveRepository.save(screenBean);
+                    //System.out.println(" INSERTION DONE FOR THE FAMILY CODE : -> "+year + " : "+family);
+                }
+            }
+        }
+       // yearFamilySet.clear(); //clear the map once all operation done
+    }
+
+    //TO INSERT THE DECK YEAR INTO DB.
+    private void insertYearIntoDatabase(Set<String> yearStore) {
+        for (String year : yearStore ) {
+            String isYearPresent = archiveRepository.checkDeckYear(year.trim()); //CHECK THE YEAR IS ALREADY PRESENT IN db.
+            //System.out.println(" isYearPresent ->> "+isYearPresent+ " : "+year);
+            if (isYearPresent == null || isYearPresent.isEmpty()){
+                ArchiveScreenBean screenBean = new ArchiveScreenBean();
+                screenBean.setRvLowValue(year);
+                screenBean.setRvDomain("PRCARCH.year");
+                archiveRepository.save(screenBean);
+               // System.out.println(" INSERTION DONE FOR THE YEAR : -> "+year);
+            }
+        }
+        //deckYearSet.clear(); //clear the set once all operation done
+    }
+
+    //RETURN THE S3 OBJECT LIST
+    private List<S3Object> getS3ObjectList() throws URISyntaxException {
+        //Creating the s3 Client that will utilize the credentials and the endpoint provided
+        S3Client client = getS3Object();
+
+        ListObjectsV2Request listObjectsRequest = ListObjectsV2Request.builder()
+                .bucket(tempFolderBucket)
+                .prefix("") // specify the folder path as prefix
+                .build();
+
+        ListObjectsV2Response listObjectsResponse = client.listObjectsV2(listObjectsRequest);
+        return listObjectsResponse.contents();
+
+    }
+
+    //IF SPECIFIED FOLDER IS NOT EXIST THEN CREATE IT ON SERVER.
+    private void createFolderIfNotExists(String folderName) throws URISyntaxException {
+        if (!doesFolderExist(folderName)) {
+            try {
+                getS3Object().putObject(PutObjectRequest.builder()
+                        .bucket(staasBucket)
+                        .key(folderName + "/") // Append slash to simulate folder
+                        .build(), RequestBody.empty());
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    // Method to delete files from tempFolderBucket
+    private void deleteFilesFromTempFolder(List<String> filesToDelete) throws URISyntaxException {
+        try {
+            S3Client s3Client = getS3Object();
+            for (String key : filesToDelete) {
+                s3Client.deleteObject(DeleteObjectRequest.builder()
+                        .bucket(tempFolderBucket)
+                        .key(key)
+                        .build());
+                //System.out.println("Deleted file: " + key);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    //TO CHECK THE SPECIFIED THE FOLDER EXIST IN SERVER OR NOT
+    private boolean doesFolderExist(String folderPath) throws URISyntaxException {
+        // Ensure folderPath ends with a slash for correct simulation of folders
+        String folderPathWithSlash = folderPath.endsWith("/") ? folderPath : folderPath + "/";
+
+        ListObjectsV2Request listObjects = ListObjectsV2Request.builder()
+                .bucket(staasBucket)
+                .prefix(folderPathWithSlash)
+                .delimiter("/") // Use delimiter to simulate folder structure
+                .build();
+
+        ListObjectsV2Response response = getS3Object().listObjectsV2(listObjects);
+
+        // Check if the response contains objects with the specified prefix
+        return !response.commonPrefixes().isEmpty() || response.contents().stream()
+                .anyMatch(s3Object -> s3Object.key().startsWith(folderPathWithSlash));
+    }
+
+    //TO CHECK THE PDF FILE IS PRESENT IN FORM OF OBJECT TO PROCESS
+    private boolean doesObjectExist(String key) {
+        try {
+            getS3Object().headObject(HeadObjectRequest.builder()
+                    .bucket(tempFolderBucket)
+                    .key(key)
+                    .build());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    //TO UPLOAD THE PDF TO SPECIFIED LOCATION
+    private boolean uploadFileToS3(InputStream inputStream, String key, long contentLength) throws URISyntaxException {
+        try {
+            getS3Object().putObject(PutObjectRequest.builder()
+                            .bucket(staasBucket)
+                            .key(key) // Specify the destination path in S3
+                            .build(),
+                    RequestBody.fromInputStream(inputStream, contentLength)); // Use -1 for unknown size
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    //TO RETURN THE LENGTH OF EACH PDF FILE.
+    private long getObjectContentLength(S3Object s3Object) {
+        return s3Object.size(); // Returns the size of the object in bytes
+    }
+
+    // Helper class to encapsulate the result of file processing
+    private static class FileProcessingResult {
+        private final String fileKey;
+        private final boolean processed;
+
+        public FileProcessingResult(String fileKey, boolean processed) {
+            this.fileKey = fileKey;
+            this.processed = processed;
+        }
+
+        public String getFileKey() {
+            return fileKey;
+        }
+
+        public boolean isProcessed() {
+            return processed;
+        }
+    }
+}

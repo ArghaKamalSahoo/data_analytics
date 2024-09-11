@@ -1,0 +1,140 @@
+# Date        By        Description
+# ----------  --------  -----------------------------------------------------
+# 2024/08/12  asahoo  US6331727-Process Archives1-Process archive for archive process sheets
+# 2024/08/12  asahoo  US6442388-Process Archives2-Generating process print requests for processes to be archived
+
+import oracledb
+import os
+import subprocess
+import math
+from configparser import ConfigParser
+
+# Command line arguments
+yearPar = os.sys.argv[1]
+cdsPar = os.sys.argv[2]
+langPar = os.sys.argv[3]
+
+# Database connection
+# Get config info
+config = ConfigParser()
+config.read('./python.ini')
+
+dbhost = config.get('DB', 'ORACLEHOST')
+dbport = config.get('DB', 'ORACLEPORT')
+dbservice = config.get('DB', 'ORACLEDB')
+dbuser = config.get('DB', 'ORACLEPROXYID')
+dbpass = config.get('DB', 'ORACLEPROXYPSWD')
+
+dsn_tns = oracledb.makedsn(dbhost, dbport, service_name=dbservice) 
+conn = oracledb.connect(user=dbuser, password=dbpass, dsn=dsn_tns)
+
+processArchiveError=0
+
+CRITERIA = "YEAR_END="+yearPar+",FAMILY_CODE={fam:},MODEL_YEAR={my:},PLANT_SEQ=,VEHICLE_CODE=,"
+CRITERIA += "YEAR_TYPE=D,SHOW_REVISIONS=A,PROCESS_TYPE=,"
+CRITERIA += "STATUS_WORKING=N,STATUS_COMPLETE=Y,STATUS_AUTHORIZED=Y,STATUS_DEACTIVATED=Y,"
+CRITERIA += "PROCESS_OWNER=,LANGUAGE_ID="+langPar+","
+CRITERIA += "PROCESS_HEADER=Y,REVISION_LOG=Y,ELEMENT_UCC=Y,ELEMENT_REMARKS=Y,ELEMENT_TIME=Y,"
+CRITERIA += "TOOLS=Y,TOOL_REMARKS=Y,ILLUSTRATIONS=Y,PARTS=Y,PART_BASE=N,PART_USAGES=Y,"
+CRITERIA += "PART_USAGES_DESC=Y,PART_PAST=Y,PART_CURRENT=Y,PART_FUTURE=Y,EMAIL_RECIPIENT="+cdsPar+","
+CRITERIA += "STUDY_NODE_ID=,STUDY_SEQ=,ALTS=0,STUDY_TYPE=N,"
+CRITERIA += "PROCESS_SELECTED=R,"
+CRITERIA += "RANGE1FROM_MA=,RANGE1FROM_SS=,RANGE1FROM_SE=,RANGE1FROM_SN=,"
+CRITERIA += "RANGE1TO_MA=,RANGE1TO_SS=,RANGE1TO_SE=,RANGE1TO_SN=,"
+CRITERIA += "RANGE2FROM_MA=,RANGE2FROM_SS=,RANGE2FROM_SE=,RANGE2FROM_SN=,"
+CRITERIA += "RANGE2TO_MA=,RANGE2TO_SS=,RANGE2TO_SE=,RANGE2TO_SN=,"
+CRITERIA += "RANGE3FROM_MA=,RANGE3FROM_SS=,RANGE3FROM_SE=,RANGE3FROM_SN=,"
+CRITERIA += "RANGE3TO_MA=,RANGE3TO_SS=,RANGE3TO_SE=,RANGE3TO_SN="
+
+COMMENTS = "Yearly Archive "+yearPar+" - Family: {fam:} Model year: {my:}"
+
+INSERT_SQL = "insert into REPORT_SCHEDULES ( RS_SEQ, RS_NODE_ID, RPT_NODE_ID,RPT_SEQ, CDS_ID, STATUS, REQUESTED_DATE, CRITERIA, COMMENTS, STATUS_DATE, MAXIMUM_RUN_TIME, PRINTER_ID, BATCH_NODE_ID, JOB_TYPE)"
+INSERT_SQL += "select RS_SEQ.nextval, NODE_ID, r.RPT_NODE_ID, r.RPT_SEQ, :cds, 'H', sysdate, :crit, :commentout, sysdate, MAXIMUM_RUN_TIME, NULL, NODE_ID, 'P' from NODES, REPORTS r where REPORT_FORM_NAME = 'PHARCHIV'"
+
+# Construct and execute the SQL queries
+xfamsIni = config.get('DEFAULT', 'NO_ARCHIVE_FAM')
+yearBeginPar = '01-JAN-'+yearPar
+yearEndPar = '31-DEC-'+yearPar
+
+FAMILY_MY_SQL = "select distinct v.family_code, pm.model_year from vehicles v, plant_vehicle_model_years pm, family_model_years fm"
+FAMILY_MY_SQL += " where instr(:xfams,v.FAMILY_CODE) <=0 and pm.VEHICLE=v.VEHICLE and PRODUCTION_START_DATE<=to_date(:yearEnd,'dd-mon-yyyy') and (PRODUCTION_END_DATE>=to_date(:yearBegin,'dd-mon-yyyy') or PRODUCTION_END_DATE is null)"
+FAMILY_MY_SQL += " and nvl(PRODUCTION_START_DATE,sysdate)<>nvl(PRODUCTION_END_DATE,sysdate) and fm.FAMILY_CODE=v.FAMILY_CODE and fm.MODEL_YEAR=pm.MODEL_YEAR"
+FAMILY_MY_SQL += " and not exists (select 1 from REPORT_SCHEDULES s, REPORTS r where r.REPORT_FORM_NAME='PHARCHIV' and s.RPT_NODE_ID=r.RPT_NODE_ID and s.RPT_SEQ=r.RPT_SEQ and s.CRITERIA like 'YEAR_END='||:year||'%,FAMILY_CODE='||v.FAMILY_CODE||'%')"
+FAMILY_MY_SQL += " order by v.family_code, pm.model_year desc"
+
+curFamMy = conn.cursor()
+curRsIns = conn.cursor()
+for r in curFamMy.execute(FAMILY_MY_SQL, yearEnd=yearEndPar, yearBegin=yearBeginPar,xfams=xfamsIni,year=yearPar):
+    critPar = CRITERIA.format(fam=r[0],my=r[1])
+    commentPar = COMMENTS.format(fam = r[0], my = r[1])
+    try:
+        curRsIns.execute(INSERT_SQL, cds=cdsPar, crit=critPar, commentout=commentPar)
+    except Exception as e:
+        processArchiveError=1
+        exit()
+curFamMy.close()
+curRsIns.close()
+
+if processArchiveError==0:
+    conn.commit()
+else:
+    conn.rollback()
+
+curPhRsIns = conn.cursor()
+curRsUpd = conn.cursor()
+curFamMoy = conn.cursor()
+curInsRsProc = conn.cursor()
+
+PHRS_INS_SQL = "select RS_NODE_ID, RS_SEQ from REPORT_SCHEDULES s join REPORTS r on s.RPT_NODE_ID = r.RPT_NODE_ID and s.RPT_SEQ = r.RPT_SEQ "
+PHRS_INS_SQL += "where r.REPORT_FORM_NAME='PHARCHIV' and s.STATUS = 'H' and s.CRITERIA like 'YEAR_END='|| :year || '%' and not exists (select 1 from RS_PROCESS_HEADERS where RS_NODE_ID = s.RS_NODE_ID and RS_SEQ = s.RS_SEQ) order by 2"
+
+UPDATE_RS_SQL = "update REPORT_SCHEDULES set comments = substr(comments, 1, decode(instr(comments, ' #Processes')-2, -2, length(comments), instr(comments, ' #Processes')))||' #Processes: '||"
+UPDATE_RS_SQL += " (select count(1) from RS_PROCESS_HEADERS where RS_NODE_ID = REPORT_SCHEDULES.RS_NODE_ID and RS_SEQ = REPORT_SCHEDULES.RS_SEQ) where (RS_NODE_ID, RS_SEQ) in (select RS_NODE_ID, RS_SEQ"
+UPDATE_RS_SQL += " from REPORT_SCHEDULES s join REPORTS r on s.RPT_NODE_ID = r.RPT_NODE_ID and s.RPT_SEQ = r.RPT_SEQ"
+UPDATE_RS_SQL += "where r.REPORT_FORM_NAME='PHARCHIV' and s.STATUS = 'H' and s.CRITERIA like 'YEAR_END=:year%')"
+
+INSERT_RS_PROCESS_SQL="INSERT INTO rs_process_headers (rs_node_id,rs_seq,ph_node_id,ph_seq,processed_flag)"
+INSERT_RS_PROCESS_SQL+="SELECT DISTINCT :rs_node_id,:rs_seq,ph_node_id,ph_seq,'N' FROM process_headers,(SELECT :family_code v_fam,:model_year v_my,:cds_id v_cds,to_date(:v_ye1231, 'yyyymmdd') v_ye1231,to_date(:v_ye0101, 'yyyymmdd') v_ye0101 FROM dual)"
+INSERT_RS_PROCESS_SQL+="WHERE ( family_code = v_fam AND model_year <= v_my AND study_node_id IS NULL AND study_seq IS NULL AND ( instr( 'CAD', status ) > 0 AND EXISTS ( SELECT 1 FROM using_plants up, plant_vehicle_model_years p, vehicles v WHERE up.ph_node_id = process_headers.ph_node_id AND up.ph_seq = process_headers.ph_seq AND effective_in_date <= v_ye1231 AND ( effective_out_date IS NULL OR effective_out_date >= v_ye0101 ) AND nvl( effective_in_date, sysdate - 4000 ) != nvl( effective_out_date, sysdate + 4000 ) AND p.plant_node_id = up.plant_node_id AND p.plant_seq = up.plant_seq AND v.family_code = process_headers.family_code AND p.production_start_date <= v_ye1231 AND ( p.production_end_date IS NULL OR p.production_end_date > v_ye0101 ) AND ( EXISTS ( SELECT 1 FROM process_uccs pu, usage_condition_codes u WHERE pu.ph_node_id = up.ph_node_id AND pu.ph_seq = up.ph_seq AND u.ucc_node_id = pu.ucc_node_id AND u.ucc_seq = pu.ucc_seq AND u.vehicle_line = v.vehicle ) OR EXISTS ( SELECT 1 FROM element_uccs eu, usage_condition_codes u WHERE eu.ph_node_id = up.ph_node_id AND eu.ph_seq = up.ph_seq AND u.ucc_node_id = eu.ucc_node_id AND u.ucc_seq = eu.ucc_seq AND u.vehicle_line = v.vehicle ) ) ) OR ( status = 'D' AND NOT EXISTS ( SELECT ph_node_id FROM process_headers r WHERE process_reference_node_id = process_headers.process_reference_node_id AND process_reference_seq = process_headers.process_reference_seq AND status IN ( 'C', 'A', 'D' ) AND ( model_year > process_headers.model_year OR ( model_year = process_headers.model_year AND revision_level > process_headers.revision_level ) OR ( model_year = process_headers.model_year AND revision_level = process_headers.revision_level AND copy_level > process_headers.copy_level ) ) ) AND EXISTS ( SELECT 1 FROM using_plants up, plant_vehicle_model_years p, vehicles  v WHERE up.ph_node_id = process_headers.ph_node_id AND up.ph_seq = process_headers.ph_seq AND effective_in_date <= v_ye1231 AND ( effective_out_date IS NULL OR effective_out_date >= v_ye0101 ) AND nvl( effective_in_date, sysdate - 4000 ) != nvl( effective_out_date, sysdate + 4000 ) AND p.plant_node_id = up.plant_node_id AND p.plant_seq = up.plant_seq AND v.family_code = process_headers.family_code AND p.production_start_date <= v_ye1231 AND ( p.production_end_date IS NULL OR p.production_end_date > v_ye0101 ) AND ( EXISTS ( SELECT 1 FROM process_uccs pu, usage_condition_codes u WHERE pu.ph_node_id = up.ph_node_id AND pu.ph_seq = up.ph_seq AND u.ucc_node_id = pu.ucc_node_id AND u.ucc_seq = pu.ucc_seq AND u.vehicle_line = v.vehicle ) OR EXISTS ( SELECT 1 FROM element_uccs eu, usage_condition_codes u WHERE eu.ph_node_id = up.ph_node_id AND eu.ph_seq = up.ph_seq AND u.ucc_node_id = eu.ucc_node_id AND u.ucc_seq = eu.ucc_seq AND u.vehicle_line = v.vehicle ) ) ) ) ) )"
+INSERT_RS_PROCESS_SQL+="AND EXISTS ( SELECT 1 FROM security_user_staffs WHERE cds_id = v_cds AND ( family_code IS NULL OR family_code = process_headers.family_code ) AND ( manufacturing_area_code IS NULL OR manufacturing_area_code = process_headers.manufacturing_area_code ) AND ( subsystem_code IS NULL OR subsystem_code = process_headers.subsystem_code ) AND ( sub_system_extension_code IS NULL OR sub_system_extension_code = process_headers.sub_system_extension_code ) )"
+INSERT_RS_PROCESS_SQL+="AND NOT EXISTS ( SELECT 1 FROM rs_process_headers WHERE rs_node_id = :rs_node_id AND rs_seq = :rs_seq AND ph_node_id = process_headers.ph_node_id AND ph_seq = process_headers.ph_seq ) AND ROWNUM < 1001"
+
+FAMILY_MOY_SQL = "select distinct v.family_code, pm.model_year from vehicles v, plant_vehicle_model_years pm, family_model_years fm"
+FAMILY_MOY_SQL += " where instr(:xfams,v.FAMILY_CODE) <=0 and pm.VEHICLE=v.VEHICLE and PRODUCTION_START_DATE<=to_date(:yearEnd,'dd-mon-yyyy') and (PRODUCTION_END_DATE>=to_date(:yearBegin,'dd-mon-yyyy') or PRODUCTION_END_DATE is null)"
+FAMILY_MOY_SQL += " and nvl(PRODUCTION_START_DATE,sysdate)<>nvl(PRODUCTION_END_DATE,sysdate) and fm.FAMILY_CODE=v.FAMILY_CODE and fm.MODEL_YEAR=pm.MODEL_YEAR"
+FAMILY_MOY_SQL += " and exists (select 1 from REPORT_SCHEDULES s, REPORTS r where r.REPORT_FORM_NAME='PHARCHIV' and s.RPT_NODE_ID=r.RPT_NODE_ID and s.RPT_SEQ=r.RPT_SEQ and s.CRITERIA like 'YEAR_END='||:year||'%,FAMILY_CODE='||v.FAMILY_CODE||'%')"
+FAMILY_MOY_SQL += " order by v.family_code, pm.model_year desc"
+
+ye1231 = yearPar+'1231'
+ye0101 = yearPar+'0101'
+rowCount=1
+processArchiveError=0
+FamilyMy=[]
+
+#Generating process print requests for processes to be archived
+
+for w in curFamMoy.execute(FAMILY_MOY_SQL, yearEnd=yearEndPar, yearBegin=yearBeginPar,xfams=xfamsIni,year=yearPar):
+    FamilyMy.append(w)
+
+for r in curPhRsIns.execute(PHRS_INS_SQL, year=yearPar):
+    for q in FamilyMy:
+        while(rowCount>0):
+            try:
+                curInsRsProc.execute(INSERT_RS_PROCESS_SQL, rs_node_id=r[0],rs_seq=r[1],family_code=q[0],model_year=q[1],cds_id=cdsPar,v_ye1231=ye1231,v_ye0101=ye0101)
+                rowCount=curInsRsProc.rowcount
+                # Call java that selects and inserts rs_process_headers
+                curRsUpd.execute(UPDATE_RS_SQL, year=yearPar)
+            except Exception as e:
+                processArchiveError=1
+                exit()
+            if rowCount>0:
+                conn.commit()
+            else:
+                print('No Rows to insert',end='\n')
+        rowCount=1
+curPhRsIns.close()
+curRsUpd.close()
+curFamMoy.close()
+
+conn.close()
+exit()

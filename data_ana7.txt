@@ -1,0 +1,288 @@
+# Date        By        Description
+# ----------  --------  -----------------------------------------------------
+# 2024/07/22  ASAHOO7   US6138102-Wers Job
+import datetime
+from itertools import product 
+
+def conv100(lineIn):
+    lenAdd = 0
+    lineCnv = ''
+    for col in range(len(lineIn) - 1):
+        if 32 <= ord(lineIn[col]) <= 126:
+            lineCnv += lineIn[col]
+        else:
+            lineCnv += '0'
+        if col == 71:
+            mon = lineIn[col+2:col+4]
+            if mon+'~' not in '01~02~03~04~05~06~07~08~09~10~11~12~':
+                lenAdd += 1
+                lineCnv = lineCnv[:-2] + '0' + lineCnv[-2:]
+    try:
+        if len(lineIn) + lenAdd < 801 and lineCnv[161] == '0':
+            lineCnv = lineCnv[:160] + '0 ' + lineCnv[161:]
+    except IndexError:
+        print("Index out of range")
+    try:
+        if lineCnv[588] not in '0123456789':
+            lineCnv = lineCnv[:588] + '0' + lineCnv[589:]
+    except IndexError:
+        print("Index out of range")
+    return lineCnv
+
+def conv202(lineIn):
+    lenAdd = 0
+    lineCnv = ''
+    sp100 = ' ' * 100
+    if len(lineIn) < 591:
+        lineIn += sp100 * 4
+        lineIn = lineIn[:591]
+    for col in range(len(lineIn) - 1):
+        if 32 <= ord(lineIn[col]) <= 126:
+            lineCnv += lineIn[col]
+        else:
+            lineCnv += '0'
+    return lineCnv
+    
+def conv206(lineIn):
+    len_line = len(lineIn)
+    lineCnv = ''
+    for col in range(len_line - 1):
+        if 32 <= ord(lineIn[col]) <= 126:
+            lineCnv += lineIn[col]
+        else:
+            lineCnv += '0'
+    return lineCnv
+    
+def conv300(lineIn):
+    len_line = len(lineIn)
+    lenAdd = 0
+    lineCnv = ''
+    for col in range(len_line - 1):
+        if 32 <= ord(lineIn[col]) <= 126:
+            lineCnv += lineIn[col]
+        else:
+            lineCnv += '0'
+        if col == 89:
+            mon = lineIn[col+2:col+4]
+            if mon not in ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']:
+                lenAdd += 1
+                lineCnv = lineCnv[:-2] + '0' + lineCnv[-2:]
+    return lineCnv
+    
+def conv500(lineIn):
+    len_line = len(lineIn)
+    lineCnv = ''
+    lineExt = []
+    numAr = []
+    lineExt.append("{:07d}".format(0))
+    for col in range(len_line - 1):
+        if 32 <= ord(lineIn[col]) <= 126:
+            lineCnv += lineIn[col]
+        else:
+            lineCnv += '0'
+        cbe = [389, 391]
+        if cbe[0] <= col <= cbe[1]:
+            if col == cbe[0]:
+                numAr = []
+            dgt = ord(lineIn[col])
+            numAr.append(dgt)
+            if col == cbe[1]:
+                num = convPacked(numAr)
+                lineExt.append("{:04d}".format(num))
+        cbe = [392, 394]
+        if cbe[0] <= col <= cbe[1]:
+            if col == cbe[0]:
+                numAr = []
+            dgt = ord(lineIn[col])
+            numAr.append(dgt)
+            if col == cbe[1]:
+                num = convPacked(numAr)
+                lineExt.append("{:04d}".format(num))
+        cbe = [409, 411]
+        if cbe[0] <= col <= cbe[1]:
+            if col == cbe[0]:
+                numAr = []
+            dgt = ord(lineIn[col])
+            numAr.append(dgt)
+            if col == cbe[1]:
+                num = convPacked(numAr)
+                lineExt.append("{:04d}".format(num))
+    try:
+        if '0123456789'.find(lineCnv[411]) < 0:
+            lineCnv = lineCnv[:411] + '0' + lineCnv[411:]
+    except IndexError:
+        print("Index out of range")
+    return lineCnv
+
+#Added for 50a File type
+def conv50a(prc_count,prcoff_count,lineIn):
+    if prc_count==1:
+        rows[14] += 1
+        print(lineIn[0:310] + lineIn[prcoff_count:prcoff_count+80], file=o50a)
+        prcoff_count += 80
+    else:
+        rows[14] += 1
+        print(lineIn[0:310] + lineIn[prcoff_count:prcoff_count+80], file=o50a)
+        prcoff_count += 80
+        prc_count -=1
+        conv50a(prc_count,prcoff_count,lineIn)
+
+def convPacked(numAr):
+    num = 0
+    vld = 1
+    lasti = len(numAr) - 1
+    multp = 1
+    if numAr[lasti] % 16 == 10 or numAr[lasti] % 16 == 11:
+        multp = -1
+    hex2dec = int(numAr[lasti] / 16)
+    if hex2dec > 9:
+        vld = 0
+    else:
+        num += hex2dec
+        exp = 1
+        for i in range(lasti - 1, 0, -1):
+            hex2dec = numAr[i] % 16
+            if hex2dec <= 9:
+                num += hex2dec * 10 ** exp
+                exp += 1
+            hex2dec = int(numAr[i] / 16)
+            if hex2dec <= 9:
+                num += hex2dec * 10 ** exp
+                exp += 1
+    if vld == 0:
+        num = 0
+    return num * multp
+
+start = datetime.datetime.now()
+
+ext100 = ' ' * 100
+line = ''
+
+inFile = './WWWRS.PROD.SORT250A.DISK.GSPAS0610'
+with open(inFile, 'r', encoding="ansi") as idk, \
+     open('./wers100.dat', 'w', encoding="utf8") as o100, \
+     open('./wers101.dat', 'w', encoding="utf8") as o101,  \
+     open('./wers105.dat', 'w', encoding="utf8") as o105, \
+     open('./wers202.dat', 'w', encoding="utf8") as o202, \
+     open('./wers205.dat', 'w', encoding="utf8") as o205, \
+     open('./wers206.dat', 'w', encoding="utf8") as o206, \
+     open('./wers207.dat', 'w', encoding="utf8") as o207, \
+     open('./wers300.dat', 'w', encoding="utf8") as o300, \
+     open('./wers301.dat', 'w', encoding="utf8") as o301, \
+     open('./wers305.dat', 'w', encoding="utf8") as o305, \
+     open('./wers306.dat', 'w', encoding="utf8") as o306, \
+     open('./wers307.dat', 'w', encoding="utf8") as o307, \
+     open('./wers308.dat', 'w', encoding="utf8") as o308, \
+     open('./wers330.dat', 'w', encoding="utf8") as o330, \
+     open('./wers331.dat', 'w', encoding="utf8") as o331, \
+     open('./wers332.dat', 'w', encoding="utf8") as o332, \
+     open('./wers500.dat', 'w', encoding="utf8") as o500, \
+     open('./wers50a.dat', 'w', encoding="utf8") as o50a:
+
+    curTyp = 'ZZZ'
+    prevTyp = 'ZZZ'
+    prevLine = ''
+    lnr = 0
+    rows = [0]*19
+    #Added for key value pair of file index
+    file_types={"101":o101,"105":o105,"205":o205,"207":o207,"301":o301,"305":o305,"306":o306,"307":o307,"308":o308,"330":o330,"331":o331,"332":o332}
+    file_rows={"101":0,"105":0,"205":0,"207":0,"301":0,"305":0,"306":0,"307":0,"308":0,"330":0,"331":0,"332":0}
+    valid_record_types = 'AUD~010~100~101~102~103~104~105~109~111~112~113~114~115~116~117~118~120~200~201~202~203~204~205~206~207~208~209~211~212~213~214~215~216~217~218~219~220~221~222~230~240~300~301~302~304~305~306~307~308~309~310~311~312~313~314~315~316~317~330~331~332~350~351~352~353~354~355~356~398~400~401~402~403~500~501~502~503~999'
+    cnt=0
+    for line in idk:
+        lnr += 1
+        line = line.rstrip()
+        prevTyp = curTyp
+        curTyp = line[63:66]
+
+        if f'{curTyp}~' not in valid_record_types:
+            if prevTyp == '100' or prevTyp == '300':
+                prevLine += '0'
+                prevLine += line
+                line = ''
+                curTyp = ''
+            else:
+                prevLine += line
+                line = ''
+                curTyp = ''
+        if len(prevLine) > 66:
+            typ = prevLine[63:66]
+            if typ == '100' and len(prevLine) < 783:
+                typ = 'ZZZ'
+            elif typ == '202' and len(prevLine) < 783:
+                typ = 'ZZZ'
+        #else:
+            #typ = 'ZZZ'
+            if typ == '101' or typ == '105' or typ == '205' or typ == '207' or typ == '301' or typ == '305' or typ == '306' or typ == '307' or typ == '308' or typ == '330' or typ == '331' or typ == '332' :
+                 print(prevLine,file=file_types.get(typ))
+                 file_rows[typ] += 1
+            elif typ == '100':
+                rows[15] += 1
+                lineCnv = conv100(prevLine)
+                print(lineCnv, file=o100)
+            elif typ == '202':
+                rows[3] += 1
+                lineCnv = conv202(prevLine)
+                print(lineCnv, file=o202)
+            elif typ == '206':
+                rows[5] += 1
+                lineCnv = conv206(prevLine)
+                print(lineCnv, file=o206)
+            elif typ == '300':
+                rows[7] += 1
+                lineCnv = conv300(prevLine)
+                print(lineCnv, file=o300)
+            if typ == '500':
+                rows[13] += 1
+                lineCnv = conv500(prevLine)
+                prcr = lineCnv[416:419]
+                prcr=prcr.lstrip('0')
+                if prcr.isdigit():
+                    prc=int(prcr)
+                else:
+                    print("Not a valid integer",prcr,end='\n')
+                prcoff = 419
+                if (prc>1):
+                    conv50a(prc,prcoff,lineCnv)
+                else:
+                    rows[14] += 1
+                    print(lineCnv[0:310] + lineCnv[prcoff:prcoff+80], file=o50a)
+                    prcoff += 80
+                lastThree = prevLine[-18:]
+                lineCnv = prevLine[0:455] + lastThree
+                print(lineCnv, file=o500)
+        prevLine = line
+
+end = datetime.datetime.now()
+
+o100.close()
+o101.close()
+o105.close()
+o202.close()
+o205.close()
+o206.close()
+o207.close()
+o300.close()
+o301.close()
+o305.close()
+o306.close()
+o307.close()
+o308.close()
+o330.close()
+o331.close()
+o332.close()
+o50a.close()
+o500.close()
+#olog.close()
+idk.close()
+
+exit()
+FooterFord Motor Company
+Ford Motor Company avatar
+Ford Motor Company
+© 2024 GitHub, Inc.
+Footer navigation
+Help
+Support
+GitHub Enterprise Server 3.12.7
+gspas-python/wers_daily.py at develop · GSPAS/gspas-python

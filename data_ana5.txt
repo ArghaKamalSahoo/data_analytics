@@ -1,0 +1,128 @@
+# generate_deactivate_user_sql python converted from Perl
+# Copyright: Ford Motor Company: 2024
+# With kind a patient assistence from copilot
+# Date        By        Description
+# ----------  --------  -----------------------------------------------------
+# 2024/07/27 asahoo7    US6208192-Deactivate Users Background Job
+
+import oracledb
+import os
+import subprocess
+import smtplib
+from email.mime.text import MIMEText
+from configparser import ConfigParser
+from ldap3 import Server, Connection,SUBTREE
+from datetime import date
+
+# Database connection
+# Get config info
+config = ConfigParser()
+config.read('./deactivate_user.ini')
+
+dbhost = config.get('DB', 'ORACLEHOST')
+dbport = config.get('DB', 'ORACLEPORT')
+dbservice = config.get('DB', 'ORACLEDB')
+dbuser = config.get('DB', 'ORACLEPROXYID')
+dbpass = config.get('DB', 'ORACLEPROXYPSWD')
+
+# LDAP connection
+# Get config info
+ldap_url= config.get('LDAP', 'LDAPURL')
+ldap_user= config.get('LDAP', 'LDAPUSER')
+ldap_pswd= config.get('LDAP', 'LDAPPSWD')
+
+dsn_tns = oracledb.makedsn(dbhost, dbport, service_name=dbservice) 
+conn = oracledb.connect(user=dbuser, password=dbpass, dsn=dsn_tns)
+
+# Initialize results
+users_to_deactivate = "Inactive\n"
+num_users_to_deactivate = 0
+users_to_deactivate_sql = ''
+deactivate_inactive = ''
+ldapresults=0
+CDSID=''
+
+# SQL query to generate deactivion script for inactive users
+get_inactive_users_sql = "select cds_id, 'update gspas_users set deactivated_date=sysdate where cds_id='''||cds_id||''';' from gspas_users where deactivated_date is null and trunc(creation_date)<=trunc(sysdate)-365 and cds_id not like 'HELPDSK%' and cds_id not like 'GFRC%' and cds_id not in ('OPS$GSOP','WEBGSPAS','WEBCAPPS','VTTO','ORPHANED','WEBCAPPS','GSPASWEB','GMIKO','DEBBING','GSPASTWN','GSOPS','AI_USER','GSPASHLP') and cds_id not in (select cds_id from gspas_user_ips where trunc(creation_date)>trunc(sysdate)-365) order by cds_id"
+
+# Prepare and execute SQL query
+cursor = conn.cursor()
+cursor.execute(get_inactive_users_sql)
+results = cursor.fetchall()
+with open('./users_to_deactivate.txt', 'w') as u, open('./users_to_deactivate.sql', 'w') as us:
+    u.write("GSPAS inactive users:\n")
+    for result in results:
+        u.write("{}\n".format(result[0]))
+        us.write(result[1] + "\n")
+        num_users_to_deactivate += 1
+    u.write("Total GSPAS inactive users: "+str(num_users_to_deactivate))
+    us.write("\n")
+u.close()
+us.close()
+
+# SQL query to get active users to be verified against LDAP
+get_active_users_sql = "select cds_id from gspas_users where deactivated_date is null and trunc(creation_date) <= trunc(sysdate)-365 and cds_id not like 'HELPDSK%' and cds_id not like 'GFRC%' and cds_id not in ('OPS$GSOP','WEBGSPAS','WEBCAPPS','VTTO','ORPHANED','WEBCAPPS','GSPASWEB','GMIKO','DEBBING','GSPASTWN','GSOPS','AI_USER') and cds_id in (select cds_id from gspas_user_ips where trunc(creation_date)>trunc(sysdate)-365) order by cds_id"
+
+# Prepare and execute SQL query
+cursor = conn.cursor()
+cursor.execute(get_active_users_sql)
+results = cursor.fetchall()
+
+# Process results
+i = 0
+num_users_to_deactivate = 0
+with open('./users_to_activate.txt', 'a') as u, open('./users_to_activate.sql', 'a') as us:
+    u.write("\nLDAP inactive users:\n")
+    for result in results:
+        i += 1
+        CDSID = result[0]
+        # Make a call to LDAP to make sure still employed
+        #Added for ldapcall
+        server = Server(ldap_url)
+        conn = Connection(server,user=ldap_user, password=ldap_pswd)
+        conn.bind()
+
+        sch_filter = ('(&(objectClass=*)(uid=%s))' % (CDSID))
+        response=conn.search(search_base = 'o=ford,c=us',                       
+        search_filter= sch_filter,
+        attributes={'CN'},
+        paged_size = 5)
+
+        for entry in conn.response:
+            attr=entry["attributes"]
+            cn=attr["cn"]
+            if ((CDSID in cn) or (CDSID.lower() in cn)):
+                ldapresults=1
+            else:
+                ldapresults=0
+        ldap=-1
+        if ldapresults:
+            ldap = 1
+        if ldap == -1:
+            u.write ("{} LDAP Check\n".format(CDSID))
+            num_users_to_deactivate += 1
+            # run sql to deactivate the user
+            us.write ("update gspas_users set deactivated_date=sysdate where cds_id='{}';\n".format(CDSID))
+    u.write("Total LDAP inactive users: "+str(num_users_to_deactivate))
+    us.write("\nCommit;")
+u.close()
+us.close()
+
+# close the db connection
+cursor.close()
+
+# close the LDAP connection
+conn.unbind()
+
+# mail list of deactivated
+'''mailcommand = 'echo "Users queued to be deactivated" | mailx -r wwwadm@ford.com -s "Users queued to be deactivated" svenkat@ford.com gspashlp@ford.com </proj/gspas/www/cgi-bin/wwwadm/users_to_deactivate.txt'
+os.system(mailcommand)'''
+FooterFord Motor Company
+Ford Motor Company avatar
+Ford Motor Company
+© 2024 GitHub, Inc.
+Footer navigation
+Help
+Support
+GitHub Enterprise Server 3.12.7
+gspas-python/generate_deactivate_user_sql.py at develop · GSPAS/gspas-python

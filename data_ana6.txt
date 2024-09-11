@@ -1,0 +1,97 @@
+# Date        By        Description
+# ----------  --------  -----------------------------------------------------
+# 2024/07/21  ASAHOO7  Viper Background Job
+#import oracledb
+import os
+import glob
+import shutil
+import subprocess
+from configparser import ConfigParser
+
+# Read configuration from INI file
+config = ConfigParser()
+config.read('./python.ini')
+
+viper_dir = config.get('DEFAULT', 'VIPER_DIR')
+work_dir = viper_dir + 'work/'
+# Split P7* files into .cnt and .sfi per Plant/ Vehicle
+files = glob.glob(viper_dir+'P7*')
+for file in files:
+    if 'CNT' in file:
+        with open(file, 'r') as inf:
+            for line in inf:
+                if 'HEADER' not in line and 'TRAILR' not in line and (',' in line or ':' in line):
+                    if ',' in line:
+                        ar = line.split(',')
+                    elif ':' in line:
+                        ar = line.split(':')
+                    try:
+                        if len(ar) > 0:
+                            out_file = viper_dir + 'v' + ar[0] + ar[1] + '.cnt'
+                            with open(out_file, 'a') as ouf:
+                                ouf.write(line)
+                    except IndexError:
+                        print("Index out of the range")
+            ouf.close()
+    elif 'SFI' in file:
+        with open(file, 'r') as inf:
+            new = 0
+            plant_veh = 'XYZ'
+            for line in inf:
+                if 'HEADER' in line:
+                    new = 1
+                elif 'HEADER' not in line and 'TRAILR' not in line and ',' in line:
+                    ar = line.split(',')
+                    if ar[0] + ar[1] != plant_veh:
+                        plant_veh = ar[0] + ar[1]
+                        new = 1
+                    if new == 1:
+                        #new = 0
+                        out_file = viper_dir + 'v' + ar[0] + ar[1] + '.sfi'
+                        with open(out_file, 'a') as ouf:
+                            ouf.write(line)
+                elif 'TRAILR' in line:
+                    new=0
+                    ouf.close()
+
+# Process files per Plant/ Vehicle
+cnt_files = glob.glob(viper_dir + '*.cnt')
+sfi_files = glob.glob(viper_dir + '*.sfi')
+for cnt_file in cnt_files:
+    if os.path.exists(cnt_file):
+        # Move work files to work directory
+        shutil.copy(cnt_file, work_dir)
+        ar = cnt_file.split('\\')
+        os.remove(work_dir+ar[-1])
+
+for sfi_file in sfi_files:
+     if os.path.exists(sfi_file):
+        shutil.copy(sfi_file, work_dir)
+        # Start Java module that processes files for 1 Plant/ Vehicle
+        #subprocess.run(['/ford/thishost/proj/gspas/reports/startup/VIPERLD.startup'])
+        # Clean up work files
+        ar = sfi_file.split('\\')
+        os.remove(work_dir+ar[-1])
+
+# Connect to db and insert next VIPER load
+'''dbhost = config.get('DB', 'ORACLEHOST')
+dbport = config.get('DB', 'ORACLEPORT')
+dbservice = config.get('DB', 'ORACLEDB')
+dbuser = config.get('DB', 'ORACLEPROXYID')
+dbpass = config.get('DB', 'ORACLEPROXYPSWD')
+#dsn_tns = oracledb.makedsn(dbhost, dbport, service_name=dbservice) 
+#conn = oracledb.connect(user=dbuser, password=dbpass, dsn=dsn_tns)
+RS_INSERT = "insert into report_schedules (rs_node_id, rs_seq, rpt_node_id, rpt_seq, cds_id, status, requested_date, criteria_text, criteria, status_date, maximum_run_time, batch_node_id, job_type, email_flag)"
+RS_INSERT += "select node_id, rs_seq.nextval, rpt_node_id, rpt_seq, 'GSPASWEB', 'N', sysdate + :days, 'VIPER load', 'Load', sysdate, maximum_run_time, 1, job_type, 'N' from reports, nodes where report_form_name = 'viperld'"
+viper_next = config.get('DEFAULT', 'VIPER_NEXT')
+cursor.execute(RS_INSERT, days = viper_next)
+conn.commit()'''
+FooterFord Motor Company
+Ford Motor Company avatar
+Ford Motor Company
+© 2024 GitHub, Inc.
+Footer navigation
+Help
+Support
+GitHub Enterprise Server 3.12.7
+gspas-python/Viper_Background_Job/viperld.py at develop · GSPAS/gspas-python

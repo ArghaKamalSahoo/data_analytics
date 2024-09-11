@@ -1,0 +1,255 @@
+# Date        By        Description
+# ----------  --------  -----------------------------------------------------
+# 2024/08/22 asahoo    US6331726-Process Purge1-Purging Process
+# 2024/08/22 asahoo    US6342650-Process Purge2-eMail Logfile to Mailbox
+
+import oracledb
+from configparser import ConfigParser
+import os
+import subprocess
+from datetime import datetime
+'''import smtplib,email,ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email import encoders
+from email.mime.base import MIMEBase'''
+
+def purgeSQL():
+   str1 = """DECLARE 
+     v_retention    number := :bper;
+     v_purge_fam    process_headers.family_code%type := :bfam;
+     v_rs_seq       number := :brsSeq;  
+     L_purge_result integer(8) := 0; 
+     L_tpo_result   number := 0; 
+     L_error_text   VARCHAR2(2000); 
+     L_uresult      VARCHAR2(2000); 
+     v_sel_pp_cnt   integer(8) := 0; 
+     v_text         varchar2(300); 
+     v_log_key      varchar2(30); 
+   BEGIN 
+      v_log_key := 'phpurge_log_'||v_rs_seq; 
+      v_text := 'Process Purge run#: '||v_rs_seq||' Family: '||v_purge_fam||' Retention: '||v_retention||' months'; 
+      GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+      -- Set low reference for ERROR_LOG queries 
+      v_text := v_rs_seq||'-start'; 
+      GALHE00A.INSERT_ERR_MSG(v_text, 2, 'phpurge', 'Y', L_uresult); 
+      v_text := 'Processes selected for purge. ('||to_char(sysdate, 'yyyy/mm/dd-hh24:mi:ss')||')';
+      GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult);
+      -- Calling the routine to break the process link and perform auth roll ups 
+      v_text := 'L_purge_result = '||L_purge_result; 
+      GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+      -- Process link breakage or auth rollups didn't happen right 
+      IF (L_purge_result < 0) THEN 
+          L_error_text := 'Failure in purging processes for family '||v_purge_fam; 
+          v_text := L_error_text; 
+          GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+          --Noting the error in the error log 
+          GALHE00A.INSERT_ERR_MSG(L_error_text, 2, 'GPRH950A', 'Y', L_uresult); 
+      END IF; 
+      -- If process link breakage and auth rollups were successful then deletion will take place 
+      IF (L_purge_result >= 0) THEN 
+         v_text := '-'; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         v_text := '-START:PROCESS_PURGES PH KEYS'; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         v_text := '-'; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         for c1 in 
+          (select ph_node_id,ph_seq 
+             from process_purges 
+            where confirmed_for_deletion = 'Y' 
+              and family_code            = v_purge_fam) 
+         loop 
+           v_sel_pp_cnt := v_sel_pp_cnt + 1; 
+           v_text := c1.ph_node_id || '$' || c1.ph_seq; 
+           GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         end loop; 
+         v_text := '-'; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         v_text := '-END:PROCESS_PURGES PH KEYS: ' || v_sel_pp_cnt; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         v_text := '-'; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         --delete from temp_process_ood before loading with latest records. 
+         delete from temp_process_ood; 
+         v_text := '-DELETE TEMP_PROCESS_OOD COUNT: ' || sql%rowcount; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         commit; 
+         --process deletion packages (GDCH945A/B) do not address PMC tables correctly. 
+         delete pmc_aff_ph_trans 
+          where (ph_node_id,ph_seq) in 
+                (select ph_node_id,ph_seq 
+                   from process_purges 
+                  where confirmed_for_deletion = 'Y' 
+                    and family_code            = v_purge_fam); 
+         v_text := '-DELETE PMC_AFF_PH_TRANS COUNT: ' || sql%rowcount; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         commit; 
+         delete pmc_aff_ph 
+          where (ph_node_id,ph_seq) in 
+                (select ph_node_id,ph_seq 
+                   from process_purges 
+                  where confirmed_for_deletion = 'Y' 
+                    and family_code            = v_purge_fam); 
+         v_text := '-DELETE PMC_AFF_PH COUNT:       ' || sql%rowcount; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         commit; 
+         v_text := 'Calling the Process delete routine for '||v_purge_fam||' family'; 
+         GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+         --Calling the routine to insert records into Temp_process_ood for deletion routine to read. 
+        v_text := 'fam: '||v_purge_fam||' res: '||L_tpo_result||' seq: '||v_rs_seq; 
+         --Entry into Temp_process_ood or deletion routine failed. 
+         IF (L_tpo_result < 0) THEN 
+             L_error_text := 'Failure in inserting process into TEMP_PROCESS_OOD for family '||v_purge_fam; 
+             v_text := L_error_text; 
+             GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+             GALHE00A.INSERT_ERR_MSG(L_error_text, 2, 'GPRH950A', 'Y', L_URESULT); 
+         END IF; 
+      END IF; 
+      v_text := 'Processes selected for purge. ('||to_char(sysdate, 'yyyy/mm/dd-hh24:mi:ss')||')'; 
+      GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult);  
+      -- Set high reference for ERROR_LOG queries 
+      v_text := v_rs_seq||'-end'; 
+      GALHE00A.INSERT_ERR_MSG(v_text, 2, 'phpurge', 'Y', v_text); 
+   EXCEPTION 
+     WHEN OTHERS THEN 
+       v_text := sqlcode || ': ' || sqlerrm; 
+       v_text :=  'Error Encountered during purging: ' || v_text ; 
+       GALHE00A.INSERT_ERR_MSG(v_text, 2, v_log_key, 'Y', L_uresult); 
+       GALHE00A.INSERT_ERR_MSG(sqlcode||' '|| sqlerrm, 1, 'GPRH950A', 'Y', L_uresult); 
+       ROLLBACK; 
+       UPDATE REPORT_SCHEDULES SET STATUS = 'E', COMMENTS = substr(v_text, 1, 255) 
+       WHERE RS_SEQ = v_rs_seq AND RS_NODE_ID = (SELECT NODE_ID FROM NODES);  
+       COMMIT; 
+   END; """
+   return str1
+
+# MAIN
+# Parameter
+inPar = os.sys.argv[1]
+pair = inPar.split('~')
+rsSeq = pair[1]
+fam = ''
+per=''
+#logFile=''
+mail_log=''
+
+config = ConfigParser()
+config.read('./phpurge.ini')
+
+dbhost = config.get('DB', 'ORACLEHOST')
+dbport = config.get('DB', 'ORACLEPORT')
+dbservice = config.get('DB', 'ORACLEDB')
+dbuser = config.get('DB', 'ORACLEPROXYID')
+dbpass = config.get('DB', 'ORACLEPROXYPSWD')
+
+# Database connection
+dsn_tns = oracledb.makedsn(dbhost, dbport, service_name=dbservice) 
+conn = oracledb.connect(user=dbuser, password=dbpass, dsn=dsn_tns)
+
+# init values
+logDir = config.get('DEFAULT', 'PNA_LOG_DIR')
+mailbox = config.get('DEFAULT', 'PNA_PURGE_MAILBOX')
+
+now = datetime.now()
+today = now.strftime("%Y-%m-%d")
+
+# SQL queries
+SQL_IP = "select count(1) from report_schedules s, reports r where report_form_name = 'phpurge' and s.rpt_node_id = r.rpt_node_id and s.rpt_seq = r.rpt_seq and instr('IE', s.status) > 0"
+SQL_GET_RS = "select rs_seq, criteria, user, substr(global_name, 1, instr(global_name||'.', '.') - 1), (select write_link from web_servers where host_name='DOCMAIL') from report_schedules s, global_name where s.rs_seq = :rs_seq"
+SQL_RS_STAT = "update report_schedules set status = :status, comments = :comments where rs_seq = :rs_seq"
+SQL_RS_PPONE = "update report_schedules set status = :status, requested_date = sysdate + 1/96 where rs_seq = :rs_seq"
+SQL_PURGE = purgeSQL()
+SQL_VERIFY_PURGE = "SELECT COUNT(1) FROM PROCESS_HEADERS PH, FAMILIES F, SVC_STUDIES SS, (SELECT PROCESS_REFERENCE_NODE_ID, PROCESS_REFERENCE_SEQ, MAX(MODEL_YEAR) MAX_YEAR FROM PROCESS_HEADERS PH2 WHERE FAMILY_CODE = NVL( :fam, FAMILY_CODE ) AND ADD_MONTHS(SYSDATE, -1 * :per) >= ( SELECT MAX(NVL(EFFECTIVE_OUT_DATE, ADD_MONTHS(SYSDATE, -1 * :per) + 1)) FROM USING_PLANTS WHERE PH_NODE_ID = PH2.PH_NODE_ID AND PH_SEQ = PH2.PH_SEQ ) AND NOT EXISTS ( SELECT NULL FROM PROCESS_HEADERS PH3, USING_PLANTS UP WHERE PH3.PROCESS_REFERENCE_NODE_ID = PH2.PROCESS_REFERENCE_NODE_ID AND PH3.PROCESS_REFERENCE_SEQ = PH2.PROCESS_REFERENCE_SEQ AND PH3.MODEL_YEAR <= PH2.MODEL_YEAR AND PH3.STATUS != 'W' AND PH3.PH_TYPE != 'CPH' AND PH3.PH_NODE_ID = UP.PH_NODE_ID AND PH3.PH_SEQ = UP.PH_SEQ AND ADD_MONTHS(SYSDATE, -1 * :per) < NVL(UP.EFFECTIVE_OUT_DATE, ADD_MONTHS(SYSDATE, -1 * :per) + 1) ) AND PH2.STUDY_NODE_ID IS NULL AND PH2.STUDY_SEQ IS NULL GROUP BY PROCESS_REFERENCE_NODE_ID, PROCESS_REFERENCE_SEQ) PH9 WHERE PH.PROCESS_REFERENCE_NODE_ID = PH9.PROCESS_REFERENCE_NODE_ID AND PH.PROCESS_REFERENCE_SEQ = PH9.PROCESS_REFERENCE_SEQ AND PH.MODEL_YEAR <= PH9.MAX_YEAR AND PH.FAMILY_CODE = F.FAMILY_CODE AND PH.STUDY_NODE_ID = SS.STUDY_NODE_ID(+) AND PH.STUDY_SEQ = SS.STUDY_SEQ(+) AND PH.SET_NUMBER = SS.SET_NUMBER(+)"
+
+# Prepare and execute SQL queries
+cursor = conn.cursor()
+cursor2 = conn.cursor()
+cursor.execute(SQL_IP)
+numIp = cursor.fetchone()
+
+print(str(numIp[0]))
+
+if numIp[0] == 1:
+    purgeLoop = True
+    while purgeLoop:
+        cursor.execute(SQL_GET_RS, rs_seq=rsSeq)
+        rs = cursor.fetchone()
+        if rs is not None:
+            rsSeq = rs[0]
+            crit = rs[1]
+            pairs = crit.split(',')
+            for pair in pairs:
+                keyVal = pair.split('=')
+                if keyVal[0] == 'FAMILY':
+                   fam = keyVal[1]
+                if keyVal[0] == 'PERIOD':
+                   per = keyVal[1]
+            user = rs[2]
+            db = rs[3]
+            #logFile = logDir+db+'_'+fam+'_'+today+'_'+str(rsSeq)+'.txt'
+
+            passCode = rs[4]
+            # Execute purge Perl command call replaced by python anonymous PLSQL block call. purge log is written in DB table ERROR_LOG
+            #cmd = 'sqlplus -S "' + dbuser + '/' + dbpass + '@' + dbservice + '" @/path/to/phpurge.sql' + " " + logFile + " " + str(rsSeq) + " " + fam + " " + str(per) + " 1"
+            #status = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            cursor2.execute(SQL_PURGE, brsSeq=str(rsSeq), bfam=fam, bper=str(per))
+            
+            logKey = 'phpurge_log_'+str(rsSeq)
+            #with open(logFile, 'w') as plog:
+            for r1 in cursor2.execute("select log_text from error_log where error_desc=:plogKey order by elog_seq", plogKey=logKey):
+                mail_log+=r1[0]
+                mail_log+="\n"
+                #print(r1[0]+"\n", file=plog)
+            # eMail logfile to mailbox
+            #[URL to mail service]+'calltype='+file+'&passcode='+passCode+'&filename='+logFile+'&retention=30&userlist='+mailbox+'&userfrom='+mailbox+'&rolecode=PURGARCH&filedesc='+desc
+            #Added for Mail Configuration
+            '''mail_body = 'Log for purge of [family_code], retention [retention months] + contents of output from PLSQL'
+            mail_host = config.get('MAIL', 'MAILHOST')
+            mail_auth =  config.get('MAIL', 'MAILAUTH')
+            mail_from = 'CDSID'
+            mail_rcpt = 'CDSID'
+            mail_subj = ' Log for purge of [family_code], retention [retention months] + contents of output from PLSQL'
+            msg = MIMEMultipart('alternative')
+            msg['Subject']= mail_subj
+            msg['From'] = mail_from
+            msg['To'] = mail_rcpt
+            msg.attach(MIMEText(mail_body, "plain"))
+            filename = "logFile"  # In same directory as script
+            with open(filename, "rb") as attachment:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(attachment.read())
+            
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                f"attachment; filename= {filename}",
+            )
+            msg.attach(part)
+            server = smtplib.SMTP(mail_host,25,timeout=120)
+            server.starttls()
+            server.set_debuglevel(1)
+            server.login(mail_from, mail_auth)
+            del mail_auth
+            server.sendmail(mail_from, mail_rcpt, msg.as_string())'''
+            
+            cursor.execute(SQL_VERIFY_PURGE, fam=fam, per=per)
+            verifyPurge = cursor.fetchone()
+            if verifyPurge[0] == 0:
+                purgeLoop = False
+                cursor.execute(SQL_RS_STAT, status='C', comments="Purge complete. Log file emailed to " + mailbox + "@ford.com ", rs_seq=rsSeq)
+                conn.commit()
+            purgeLoop = False
+            cursor.execute(SQL_RS_STAT, status='C', comments="Purge complete. Log file emailed to " + mailbox + "@ford.com ", rs_seq=rsSeq)
+            conn.commit()
+else:
+    if numIp[0] > 1:
+        cursor.execute(SQL_RS_STAT, status='H', comments="Request put back in Hold status. Finish/ Clear other Purges in progress/ error status first. ", rs_seq=rsSeq)
+    else:
+        cursor.execute(SQL_RS_PPONE, status='N', rs_seq=rsSeq)
+    conn.commit()
+    print("Request skipped, other Purges in progress/ error status. Purges will be handled 1 by 1.")
+    exitStatus = 1
+
+conn.close()
+#'''
